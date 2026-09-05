@@ -103,7 +103,7 @@
 	import { createOpenAITextStream } from '$lib/apis/streaming';
 	import { getFunctions } from '$lib/apis/functions';
 	import { initiateOAuthRedirect } from '$lib/apis/configs';
-	import { updateFolderById } from '$lib/apis/folders';
+	import { getFolderById, updateFolderById } from '$lib/apis/folders';
 
 	import Banner from '../common/Banner.svelte';
 	import MessageInput from '$lib/components/chat/MessageInput.svelte';
@@ -1571,10 +1571,21 @@
 
 		const selectedFolderSubscribe = selectedFolder.subscribe(async (folder) => {
 			await tick();
+
 			if (folder?.data?.model_ids && !equal(selectedModels, folder.data.model_ids)) {
 				selectedModels = folder.data.model_ids;
 
 				console.log('Set selectedModels from folder data:', selectedModels);
+			}
+
+			// Folder landing pages and new chats inherit the Folder's Files Workspace.
+			// Existing chats resolve their workspace from chat.folder_id inside loadChat().
+			// Embedded chats must not change the application's global filesystem context.
+			if (!embedded && !chatIdProp) {
+				const workspaceConnectionId =
+					(folder as any)?.data?.workspace?.connection_id ?? null;
+
+				selectedTerminalId.set(workspaceConnectionId);
 			}
 		});
 
@@ -2263,6 +2274,27 @@
 			hasChatPayload: !!chat?.chat,
 			title: chat?.title
 		});
+
+		// Main chats inherit their Files Workspace from the containing Folder.
+		// Embedded chats must not mutate the application's global terminal selection.
+		if (!embedded) {
+			let workspaceConnectionId: string | null = null;
+			const folderId = (chat as any)?.folder_id ?? null;
+
+			if (folderId) {
+				const folder = await getFolderById(localStorage.token, folderId).catch((error) => {
+					console.warn('Failed to resolve folder Files Workspace', {
+						folderId,
+						error
+					});
+					return null;
+				});
+
+				workspaceConnectionId = folder?.data?.workspace?.connection_id ?? null;
+			}
+
+			selectedTerminalId.set(workspaceConnectionId);
+		}
 
 		if (chat) {
 			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
