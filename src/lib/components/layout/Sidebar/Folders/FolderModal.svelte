@@ -8,7 +8,7 @@
 	import { toast } from 'svelte-sonner';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { user, config } from '$lib/stores';
+	import { user, config, terminalServers } from '$lib/stores';
 
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
@@ -27,10 +27,21 @@
 	let meta = {
 		background_image_url: null
 	};
-	let data = {
+	let data: {
+		system_prompt: string;
+		files: any[];
+		[key: string]: any;
+	} = {
 		system_prompt: '',
 		files: []
 	};
+	let filesWorkspaceTerminalId = '';
+
+	$: filesWorkspaceTerminals = ($terminalServers ?? []).filter(
+		(terminal: any) =>
+			terminal?.id &&
+			(terminal?.config?.chat_uploads === 'filesystem' || terminal.id === filesWorkspaceTerminalId)
+	);
 
 	let loading = false;
 
@@ -56,7 +67,15 @@
 		await onSubmit({
 			name,
 			meta,
-			data,
+			data: {
+				...data,
+				files_workspace: filesWorkspaceTerminalId
+					? {
+							...(data?.files_workspace ?? {}),
+							terminal_id: filesWorkspaceTerminalId
+						}
+					: null
+			},
 			parent_id: edit ? undefined : parentId
 		});
 		show = false;
@@ -74,10 +93,12 @@
 			meta = folder.meta || {
 				background_image_url: null
 			};
-			data = folder.data || {
+			data = {
 				system_prompt: '',
-				files: []
+				files: [],
+				...(folder.data ?? {})
 			};
+			filesWorkspaceTerminalId = folder?.data?.files_workspace?.terminal_id ?? '';
 		}
 
 		focusInput();
@@ -105,6 +126,7 @@
 			system_prompt: '',
 			files: []
 		};
+		filesWorkspaceTerminalId = '';
 	}
 </script>
 
@@ -239,6 +261,24 @@
 								</div>
 							</div>
 						</Knowledge>
+					</div>
+
+					<div class="my-2">
+						<div class="mb-1.5 text-xs text-gray-500">{$i18n.t('Files Workspace')}</div>
+						<select
+							class="w-full rounded-lg border border-gray-100 bg-transparent px-3 py-2 text-sm outline-hidden dark:border-gray-800"
+							bind:value={filesWorkspaceTerminalId}
+						>
+							<option value="">{$i18n.t('None')}</option>
+							{#each filesWorkspaceTerminals as terminal}
+								<option value={terminal.id}>{terminal.name || terminal.id}</option>
+							{/each}
+						</select>
+						<div class="mt-1.5 text-[0.6875rem] leading-4 text-gray-400 dark:text-gray-500">
+							{$i18n.t(
+								'Use this filesystem workspace automatically for chats created in this folder.'
+							)}
+						</div>
 					</div>
 
 					<div class="flex justify-end pt-3 text-sm font-normal gap-1.5">
