@@ -348,7 +348,12 @@
 					                bind:value={workspaceConnectionId}
 					        >
 					                <option value="">{$i18n.t('None')}</option>
-					                {#each ($terminalServers ?? []).filter((terminal) => terminal?.id) as terminal}
+					                {#each ($terminalServers ?? []).filter(
+					                        (terminal) =>
+					                                terminal?.id &&
+					                                (terminal?.config?.files_workspace === true ||
+					                                        terminal?.config?.chat_uploads === 'filesystem')
+					                ) as terminal}
 					                        <option value={terminal.id}>{terminal.name ?? terminal.id}</option>
 					                {/each}
 					        </select>
