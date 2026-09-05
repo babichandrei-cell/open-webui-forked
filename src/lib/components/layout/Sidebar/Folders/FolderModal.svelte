@@ -8,7 +8,7 @@
 	import { toast } from 'svelte-sonner';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { user, config } from '$lib/stores';
+	import { user, config, terminalServers } from '$lib/stores';
 
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
@@ -31,6 +31,7 @@
 		system_prompt: '',
 		files: []
 	};
+	let workspaceConnectionId = '';
 
 	let loading = false;
 
@@ -51,6 +52,14 @@
 			);
 			loading = false;
 			return;
+		}
+
+		if (workspaceConnectionId) {
+			(data as any).workspace = {
+				connection_id: workspaceConnectionId
+			};
+		} else {
+			delete (data as any).workspace;
 		}
 
 		await onSubmit({
@@ -78,6 +87,7 @@
 				system_prompt: '',
 				files: []
 			};
+			workspaceConnectionId = (data as any)?.workspace?.connection_id ?? '';
 		}
 
 		focusInput();
@@ -105,6 +115,7 @@
 			system_prompt: '',
 			files: []
 		};
+		workspaceConnectionId = '';
 	}
 </script>
 
@@ -239,6 +250,24 @@
 								</div>
 							</div>
 						</Knowledge>
+					</div>
+
+					<hr class=" border-gray-50 dark:border-gray-850/30 my-2.5 w-full" />
+
+					<div class="my-2">
+						<div class="mb-2 text-xs text-gray-500">{$i18n.t('Files Workspace')}</div>
+						<select
+							class="w-full rounded-lg border border-gray-100 bg-transparent px-3 py-2 text-sm outline-hidden dark:border-gray-850"
+							bind:value={workspaceConnectionId}
+						>
+							<option value="">{$i18n.t('None')}</option>
+							{#each ($terminalServers ?? []).filter((terminal) => terminal?.id) as terminal}
+								<option value={terminal.id}>{terminal.name ?? terminal.id}</option>
+							{/each}
+						</select>
+						<div class="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
+							{$i18n.t('This workspace will be available to chats in this folder.')}
+						</div>
 					</div>
 
 					<div class="flex justify-end pt-3 text-sm font-normal gap-1.5">
