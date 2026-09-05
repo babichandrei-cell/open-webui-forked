@@ -365,7 +365,7 @@
 	const getTerminal = (): { url: string; key: string } | null => {
 		const systemTerminal = $selectedTerminalId
 			? (($terminalServers ?? []).find((t) => t.id === $selectedTerminalId) ?? null)
-			: ($terminalServers?.[0] ?? null);
+			: null;
 		const chatConfig = chatContext(systemTerminal);
 		const chatScoped = !!systemTerminal && chatConfig?.context_id === 'chat_id';
 		terminalChatContextHidden =

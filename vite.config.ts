@@ -26,6 +26,9 @@ export default defineConfig({
 		sourcemap: true
 	},
 	server: {
+		watch: {
+			ignored: ['**/test-data/**']
+		},
 		proxy: {
 			'/api': {
 				target: backendTarget,
