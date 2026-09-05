@@ -7,9 +7,15 @@
 	import Chat from '$lib/components/chat/Chat.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { getFolderById } from '$lib/apis/folders';
-	import { selectedFolder } from '$lib/stores';
+	import { selectedFolder, selectedTerminalId } from '$lib/stores';
 
 	let ready = false;
+	let workspaceManaged = false;
+
+	const applyFolderFilesWorkspace = (folder: any) => {
+		workspaceManaged = true;
+		selectedTerminalId.set(folder?.data?.files_workspace?.terminal_id ?? null);
+	};
 
 	onMount(async () => {
 		const folderId = $page.params.folderId;
@@ -35,11 +41,15 @@
 			await selectedFolder.set(folder);
 		}
 
+		applyFolderFilesWorkspace($selectedFolder);
 		ready = true;
 	});
 
 	onDestroy(() => {
 		selectedFolder.set(null);
+		if (workspaceManaged) {
+			selectedTerminalId.set(null);
+		}
 	});
 </script>
 
