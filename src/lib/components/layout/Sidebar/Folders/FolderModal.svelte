@@ -8,11 +8,20 @@
 	import { toast } from 'svelte-sonner';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
-	import { user, config, terminalServers } from '$lib/stores';
+	import {
+                user,
+                config,
+                terminalServers,
+                selectedFolder,
+                selectedTerminalId
+        } from '$lib/stores';
+        import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Knowledge from '$lib/components/workspace/Models/Knowledge.svelte';
 	import { getFolderById } from '$lib/apis/folders';
+        import { createFilesWorkspace } from '$lib/apis/configs';
+        import { getTerminalServers } from '$lib/apis/terminal';
 	const i18n = getContext('i18n');
 
 	export let show = false;
@@ -32,10 +41,60 @@
 		files: []
 	};
 	let workspaceConnectionId = '';
+        let showCreateWorkspace = false;
+        let newWorkspaceName = '';
+        let creatingWorkspace = false;
 
 	let loading = false;
 
-	const submitHandler = async () => {
+	const refreshTerminalServers = async () => {
+                const systemTerminals = await getTerminalServers(localStorage.token);
+
+                terminalServers.set(
+                        systemTerminals.map((terminal) => ({
+                                id: terminal.id,
+                                url: `${WEBUI_API_BASE_URL}/terminals/${terminal.id}`,
+                                name: terminal.name,
+                                key: localStorage.token,
+                                contexts: terminal.contexts ?? {},
+                                config: terminal.config ?? {}
+                        }))
+                );
+        };
+
+        const createWorkspaceHandler = async () => {
+                const workspaceName = newWorkspaceName.trim();
+
+                if (!workspaceName) {
+                        toast.error($i18n.t('Workspace name cannot be empty.'));
+                        return;
+                }
+
+                creatingWorkspace = true;
+
+                try {
+                        const workspace = await createFilesWorkspace(localStorage.token, workspaceName);
+
+                        if (!workspace?.connection_id) {
+                                throw new Error('Files Workspace was created without a connection ID.');
+                        }
+
+                        await refreshTerminalServers();
+
+                        workspaceConnectionId = workspace.connection_id;
+                        newWorkspaceName = '';
+                        showCreateWorkspace = false;
+
+                        toast.success($i18n.t('Files Workspace created.'));
+                } catch (error) {
+                        console.error(error);
+                        toast.error(`${error}`);
+                } finally {
+                        creatingWorkspace = false;
+                }
+        };
+
+        const submitHandler = async () => {
 		loading = true;
 
 		if ((data?.files ?? []).some((file) => file.status === 'uploading')) {
@@ -68,6 +127,10 @@
 			data,
 			parent_id: edit ? undefined : parentId
 		});
+
+                if (edit && folderId && $selectedFolder?.id === folderId) {
+                        selectedTerminalId.set(workspaceConnectionId || null);
+                }
 		show = false;
 		loading = false;
 	};
@@ -106,7 +169,13 @@
 		init();
 	}
 
-	$: if (!show && !edit) {
+	$: if (!show) {
+                showCreateWorkspace = false;
+                newWorkspaceName = '';
+                creatingWorkspace = false;
+        }
+
+        $: if (!show && !edit) {
 		name = '';
 		meta = {
 			background_image_url: null
@@ -255,22 +324,84 @@
 					<hr class=" border-gray-50 dark:border-gray-850/30 my-2.5 w-full" />
 
 					<div class="my-2">
-						<div class="mb-2 text-xs text-gray-500">{$i18n.t('Files Workspace')}</div>
-						<select
-							class="w-full rounded-lg border border-gray-100 bg-transparent px-3 py-2 text-sm outline-hidden dark:border-gray-850"
-							bind:value={workspaceConnectionId}
-						>
-							<option value="">{$i18n.t('None')}</option>
-							{#each ($terminalServers ?? []).filter((terminal) => terminal?.id) as terminal}
-								<option value={terminal.id}>{terminal.name ?? terminal.id}</option>
-							{/each}
-						</select>
-						<div class="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
-							{$i18n.t('This workspace will be available to chats in this folder.')}
-						</div>
+					        <div class="mb-2 flex items-center justify-between gap-2">
+					                <div class="text-xs text-gray-500">
+					                        {$i18n.t('Files Workspace')}
+					                </div>
+
+					                {#if $user?.role === 'admin' && !showCreateWorkspace}
+					                        <button
+					                                type="button"
+					                                class="text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+					                                on:click={() => {
+					                                        showCreateWorkspace = true;
+					                                        newWorkspaceName = name ? `${name} Files` : '';
+					                                }}
+					                        >
+					                                + {$i18n.t('Create Workspace')}
+					                        </button>
+					                {/if}
+					        </div>
+
+					        <select
+					                class="w-full rounded-lg border border-gray-100 bg-transparent px-3 py-2 text-sm outline-hidden dark:border-gray-850"
+					                bind:value={workspaceConnectionId}
+					        >
+					                <option value="">{$i18n.t('None')}</option>
+					                {#each ($terminalServers ?? []).filter((terminal) => terminal?.id) as terminal}
+					                        <option value={terminal.id}>{terminal.name ?? terminal.id}</option>
+					                {/each}
+					        </select>
+
+					        {#if showCreateWorkspace}
+					                <div class="mt-2 flex gap-2">
+					                        <input
+					                                type="text"
+					                                class="min-w-0 flex-1 rounded-lg border border-gray-100 bg-transparent px-3 py-2 text-sm outline-hidden dark:border-gray-850"
+					                                placeholder={$i18n.t('Workspace name')}
+					                                bind:value={newWorkspaceName}
+					                                disabled={creatingWorkspace}
+					                                on:keydown={(event) => {
+					                                        if (event.key === 'Enter') {
+					                                                event.preventDefault();
+					                                                createWorkspaceHandler();
+					                                        }
+					                                }}
+					                        />
+
+					                        <button
+					                                type="button"
+					                                class="rounded-lg bg-black px-3 py-2 text-sm text-white hover:bg-gray-950 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-gray-100"
+					                                disabled={creatingWorkspace || !newWorkspaceName.trim()}
+					                                on:click={createWorkspaceHandler}
+					                        >
+					                                {#if creatingWorkspace}
+					                                        <Spinner />
+					                                {:else}
+					                                        {$i18n.t('Create')}
+					                                {/if}
+					                        </button>
+
+					                        <button
+					                                type="button"
+					                                class="rounded-lg border border-gray-100 px-3 py-2 text-sm hover:bg-gray-50 dark:border-gray-850 dark:hover:bg-gray-900"
+					                                disabled={creatingWorkspace}
+					                                on:click={() => {
+					                                        showCreateWorkspace = false;
+					                                        newWorkspaceName = '';
+					                                }}
+					                        >
+					                                {$i18n.t('Cancel')}
+					                        </button>
+					                </div>
+					        {/if}
+
+					        <div class="mt-1.5 text-xs text-gray-400 dark:text-gray-500">
+					                {$i18n.t('This workspace will be available to chats in this folder.')}
+					        </div>
 					</div>
 
-					<div class="flex justify-end pt-3 text-sm font-normal gap-1.5">
+                                    <div class="flex justify-end pt-3 text-sm font-normal gap-1.5">
 						<button
 							class="px-3.5 py-1.5 text-sm font-normal bg-black hover:bg-gray-950 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full flex flex-row space-x-1 items-center {loading
 								? ' cursor-not-allowed'

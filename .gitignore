@@ -311,3 +311,9 @@ cypress/videos
 cypress/screenshots
 .vscode/settings.json
 .cptr
+
+# Local Open WebUI fork development artifacts
+test-data/
+*.pre-files-workspace
+*.pre-create-workspace
+*.pre-create-workspace-2

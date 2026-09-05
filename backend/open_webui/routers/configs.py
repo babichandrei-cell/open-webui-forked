@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from typing import Optional
+from uuid import uuid4
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -37,6 +39,16 @@ from pydantic import BaseModel, ConfigDict
 router = APIRouter()
 
 log = logging.getLogger(__name__)
+
+PROJECT_FILES_API_URL = os.getenv(
+    'PROJECT_FILES_API_URL',
+    'http://127.0.0.1:8003',
+).rstrip('/')
+
+PROJECT_FILES_ADMIN_KEY = os.getenv(
+    'PROJECT_FILES_ADMIN_KEY',
+    '',
+)
 
 CONNECTIONS_CONFIG_KEYS = {
     'ENABLE_DIRECT_CONNECTIONS': 'direct.enable',
@@ -320,6 +332,10 @@ class TerminalServersConfigForm(BaseModel):
     TERMINAL_SERVER_CONNECTIONS: list[TerminalServerConnection]
 
 
+class CreateFilesWorkspaceForm(BaseModel):
+    name: str
+
+
 @router.get('/terminal_servers')
 async def get_terminal_servers_config(request: Request, user=Depends(get_admin_user)):
     return {'TERMINAL_SERVER_CONNECTIONS': await Config.get('terminal_server.connections')}
@@ -347,6 +363,140 @@ async def set_terminal_servers_config(
         data={'count': len(connections)},
     )
     return {'TERMINAL_SERVER_CONNECTIONS': connections}
+
+
+@router.post('/files_workspaces')
+async def create_files_workspace(
+    request: Request,
+    form_data: CreateFilesWorkspaceForm,
+    user=Depends(get_admin_user),
+):
+    name = form_data.name.strip()
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail='Workspace name cannot be empty',
+        )
+
+    if not PROJECT_FILES_ADMIN_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail='Project Files provisioning is not configured',
+        )
+
+    headers = {
+        'Authorization': f'Bearer {PROJECT_FILES_ADMIN_KEY}',
+        'Content-Type': 'application/json',
+    }
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT),
+        ) as session:
+            async with session.post(
+                f'{PROJECT_FILES_API_URL}/admin/workspaces',
+                headers=headers,
+                json={'name': name},
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as response:
+                try:
+                    payload = await response.json()
+                except Exception:
+                    payload = None
+
+                if response.status >= 400:
+                    detail = (
+                        payload.get('detail')
+                        if isinstance(payload, dict)
+                        else None
+                    )
+
+                    raise HTTPException(
+                        status_code=502,
+                        detail=detail or 'Failed to create Files Workspace',
+                    )
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        log.exception(
+            'Failed to create Files Workspace via Project Files API'
+        )
+
+        raise HTTPException(
+            status_code=502,
+            detail='Project Files API is unavailable',
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=502,
+            detail='Invalid response from Project Files API',
+        )
+
+    workspace_id = payload.get('id')
+    workspace_token = payload.get('token')
+
+    if not workspace_id or not workspace_token:
+        raise HTTPException(
+            status_code=502,
+            detail='Incomplete response from Project Files API',
+        )
+
+    connection_id = str(uuid4())
+
+    connections = (
+        await Config.get(
+            'terminal_server.connections',
+            [],
+        )
+        or []
+    )
+
+    connection = {
+        'id': connection_id,
+        'name': name,
+        'enabled': True,
+        'url': PROJECT_FILES_API_URL,
+        'path': '/openapi.json',
+        'key': workspace_token,
+        'auth_type': 'bearer',
+        'config': {
+            'chat_uploads': 'filesystem',
+            'files_workspace': True,
+            'workspace_id': workspace_id,
+        },
+    }
+
+    connections.append(connection)
+
+    await Config.upsert(
+        {
+            'terminal_server.connections': connections,
+        }
+    )
+
+    await set_terminal_servers(request)
+
+    await publish_event(
+        request,
+        EVENTS.CONFIG_TERMINAL_SERVERS_UPDATED,
+        actor=user,
+        subject_id='terminal_server.connections',
+        subject_type='config',
+        data={
+            'count': len(connections),
+            'created_files_workspace': workspace_id,
+        },
+    )
+
+    return {
+        'connection_id': connection_id,
+        'workspace_id': workspace_id,
+        'name': name,
+    }
 
 
 @router.post('/terminal_servers/verify')

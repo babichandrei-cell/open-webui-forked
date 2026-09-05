@@ -452,6 +452,37 @@ export const refreshOrchestratorTerminals = async (
 	return res;
 };
 
+export const createFilesWorkspace = async (token: string, name: string) => {
+        let error = null;
+
+        const res = await fetch(`${WEBUI_API_BASE_URL}/configs/files_workspaces`, {
+                method: 'POST',
+                headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${token}`
+                },
+                body: JSON.stringify({
+                        name
+                })
+        })
+                .then(async (res) => {
+                        if (!res.ok) throw await res.json();
+                        return res.json();
+                })
+                .catch((err) => {
+                        console.error(err);
+                        error = err.detail;
+                        return null;
+                });
+
+        if (error) {
+                throw error;
+        }
+
+        return res;
+};
+
+
 /**
  * Verify a terminal server connection via the backend proxy.
  * Used for system/admin connections to avoid CORS issues and API key exposure.
