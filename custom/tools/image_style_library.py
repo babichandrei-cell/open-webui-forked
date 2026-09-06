@@ -3,7 +3,7 @@ title: Image Style Library
 author: Andrei
 description: Saves structured image style profiles and their reference images to a persistent local style library.
 required_open_webui_version: 0.11.0
-version: 1.0.0
+version: 1.1.0
 license: MIT
 """
 
@@ -16,13 +16,28 @@ import shutil
 import tempfile
 import unicodedata
 
+import aiohttp
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
+
+
+from open_webui.models.config import Config
+from open_webui.models.users import Users
+from open_webui.utils.terminals import (
+    TERMINAL_CONTEXT_HEADER,
+    get_terminal_server_url,
+    terminal_context_config,
+    terminal_context_id,
+)
+from open_webui.utils.tools import build_tool_server_headers, get_terminal_tools
 
 
 class Tools:
     ROOT_DIR = Path("/srv/image_styles")
+    DRAFT_ROOT = Path("/srv/image_style_drafts")
 
     SUPPORTED_MIME_TYPES = {
         "image/jpeg": "jpg",
@@ -356,6 +371,562 @@ class Tools:
         return unique, duplicates
 
     # ------------------------------------------------------------------
+    # Files Workspace reference resolution
+    # ------------------------------------------------------------------
+
+    def _filesystem_attachment_path(
+        self,
+        item: Dict[str, Any],
+    ) -> Optional[str]:
+        if not isinstance(item, dict) or item.get("type") != "filesystem":
+            return None
+
+        nested = item.get("file")
+
+        for candidate in (
+            item.get("path"),
+            nested.get("path") if isinstance(nested, dict) else None,
+            item.get("id"),
+            item.get("url"),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                value = candidate.strip()
+                return value if value.startswith("/") else f"/{value}"
+
+        return None
+
+    def _filesystem_attachment_name(
+        self,
+        item: Dict[str, Any],
+        source_path: str,
+    ) -> str:
+        nested = item.get("file")
+
+        for candidate in (
+            item.get("name"),
+            item.get("filename"),
+            nested.get("name") if isinstance(nested, dict) else None,
+            nested.get("filename") if isinstance(nested, dict) else None,
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                return Path(candidate).name
+
+        return Path(source_path).name or "reference-image"
+
+    async def _resolve_files_workspace(
+        self,
+        files: Any,
+        request: Any,
+        metadata: Dict[str, Any],
+        user_context: Dict[str, Any],
+        oauth_token: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[dict], Optional[dict], Optional[dict], Optional[str]]:
+        if request is None:
+            return None, None, None, None
+
+        metadata = metadata if isinstance(metadata, dict) else {}
+
+        terminal_id = metadata.get("terminal_id")
+        if isinstance(terminal_id, str):
+            terminal_id = terminal_id.strip() or None
+        else:
+            terminal_id = None
+
+        attachment_terminal_ids = {
+            str(item.get("terminal_id")).strip()
+            for item in (files or [])
+            if isinstance(item, dict)
+            and item.get("type") == "filesystem"
+            and isinstance(item.get("terminal_id"), str)
+            and item.get("terminal_id").strip()
+        }
+
+        if terminal_id:
+            resolved_terminal_id = terminal_id
+        elif len(attachment_terminal_ids) == 1:
+            resolved_terminal_id = next(iter(attachment_terminal_ids))
+        else:
+            return None, None, None, None
+
+        connections = await Config.get(
+            "terminal_server.connections",
+            [],
+        ) or []
+
+        connection = next(
+            (
+                item
+                for item in connections
+                if isinstance(item, dict)
+                and item.get("id") == resolved_terminal_id
+            ),
+            None,
+        )
+
+        if connection is None or not connection.get("enabled", True):
+            return None, None, None, None
+
+        config = connection.get("config") or {}
+
+        if not (
+            config.get("files_workspace") is True
+            or config.get("chat_uploads") == "filesystem"
+        ):
+            return None, None, None, None
+
+        user_id = None
+        if isinstance(user_context, dict) and user_context.get("id"):
+            user_id = str(user_context["id"])
+
+        if not user_id:
+            return None, None, None, None
+
+        user = await Users.get_user_by_id(user_id)
+        if user is None:
+            return None, None, None, None
+
+        await get_terminal_tools(
+            request,
+            resolved_terminal_id,
+            user,
+            {
+                "__metadata__": metadata,
+                "__oauth_token__": oauth_token,
+            },
+        )
+
+        headers, cookies = await build_tool_server_headers(
+            connection,
+            request,
+            user,
+            server_id=resolved_terminal_id,
+            metadata=metadata,
+            extra_params={
+                "__oauth_token__": oauth_token,
+            },
+        )
+
+        headers["X-User-Id"] = user.id
+
+        chat_id = metadata.get("chat_id")
+        if chat_id:
+            headers["X-Session-Id"] = str(chat_id)
+
+        terminal_context = (
+            "automation"
+            if metadata.get("automation_id")
+            else "chat"
+        )
+
+        context_id = terminal_context_id(
+            connection,
+            metadata,
+            terminal_context,
+        )
+
+        context_config = terminal_context_config(
+            connection,
+            terminal_context,
+        )
+
+        if (
+            isinstance(context_config, dict)
+            and context_config.get("context_id")
+            in {"chat_id", "automation_id"}
+            and not context_id
+        ):
+            return None, None, None, None
+
+        if context_id:
+            headers[TERMINAL_CONTEXT_HEADER] = context_id
+
+        return connection, headers, cookies, resolved_terminal_id
+
+    async def _extract_filesystem_reference_images(
+        self,
+        files: Any,
+        request: Any,
+        metadata: Dict[str, Any],
+        user_context: Dict[str, Any],
+        oauth_token: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        attachments = [
+            item
+            for item in (files or [])
+            if isinstance(item, dict)
+            and item.get("type") == "filesystem"
+        ]
+
+        if not attachments:
+            return []
+
+        connection, headers, cookies, terminal_id = (
+            await self._resolve_files_workspace(
+                files,
+                request,
+                metadata,
+                user_context,
+                oauth_token,
+            )
+        )
+
+        if (
+            connection is None
+            or headers is None
+            or cookies is None
+            or not terminal_id
+        ):
+            raise ValueError(
+                "Files Workspace reference images could not be resolved "
+                "through the authorized workspace connection."
+            )
+
+        base_url = get_terminal_server_url(connection).rstrip("/")
+        timeout = aiohttp.ClientTimeout(total=45)
+
+        references: List[Dict[str, Any]] = []
+        total_bytes = 0
+
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            trust_env=True,
+        ) as session:
+            for item in attachments:
+                item_terminal_id = item.get("terminal_id")
+                if (
+                    isinstance(item_terminal_id, str)
+                    and item_terminal_id.strip()
+                    and item_terminal_id.strip() != terminal_id
+                ):
+                    continue
+
+                source_path = self._filesystem_attachment_path(item)
+                if not source_path:
+                    continue
+
+                original_name = self._filesystem_attachment_name(
+                    item,
+                    source_path,
+                )
+
+                try:
+                    async with session.get(
+                        f"{base_url}/files/view",
+                        params={"path": source_path},
+                        headers=headers,
+                        cookies=cookies,
+                    ) as response:
+                        if response.status != 200:
+                            raise ValueError(
+                                f"Could not read Files Workspace reference "
+                                f"{original_name!r}: HTTP {response.status}."
+                            )
+
+                        chunks: List[bytes] = []
+                        size = 0
+
+                        async for chunk in response.content.iter_chunked(
+                            64 * 1024
+                        ):
+                            if not chunk:
+                                continue
+
+                            size += len(chunk)
+
+                            if size > self.MAX_REFERENCE_BYTES:
+                                raise ValueError(
+                                    f"Reference image {original_name!r} "
+                                    f"exceeds {self.MAX_REFERENCE_BYTES} bytes."
+                                )
+
+                            chunks.append(chunk)
+
+                        data = b"".join(chunks)
+
+                        declared_mime = (
+                            response.headers.get("Content-Type", "")
+                            .split(";", 1)[0]
+                            .strip()
+                            .lower()
+                        )
+
+                except ValueError:
+                    raise
+                except Exception as exc:
+                    raise ValueError(
+                        f"Could not read Files Workspace reference "
+                        f"{original_name!r}: {exc}"
+                    ) from exc
+
+                if not data:
+                    raise ValueError(
+                        f"Reference image {original_name!r} decoded to zero bytes."
+                    )
+
+                detected_mime = None
+
+                if data[:3] == b"\xff\xd8\xff":
+                    detected_mime = "image/jpeg"
+                elif data[:8] == b"\x89PNG\r\n\x1a\n":
+                    detected_mime = "image/png"
+                elif (
+                    len(data) >= 12
+                    and data[:4] == b"RIFF"
+                    and data[8:12] == b"WEBP"
+                ):
+                    detected_mime = "image/webp"
+
+                if detected_mime not in self.SUPPORTED_MIME_TYPES:
+                    continue
+
+                if (
+                    declared_mime.startswith("image/")
+                    and declared_mime in self.SUPPORTED_MIME_TYPES
+                    and declared_mime != detected_mime
+                    and not (
+                        declared_mime == "image/jpg"
+                        and detected_mime == "image/jpeg"
+                    )
+                ):
+                    raise ValueError(
+                        f"Reference image {original_name!r} MIME does not "
+                        "match its content signature."
+                    )
+
+                total_bytes += len(data)
+
+                if total_bytes > self.MAX_TOTAL_BYTES:
+                    raise ValueError(
+                        "Combined reference image size exceeds the maximum "
+                        f"allowed total of {self.MAX_TOTAL_BYTES} bytes."
+                    )
+
+                references.append(
+                    {
+                        "mime_type": detected_mime,
+                        "extension": self.SUPPORTED_MIME_TYPES[detected_mime],
+                        "data": data,
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                        "size_bytes": len(data),
+                        "original_name": original_name,
+                        "source_path": source_path,
+                        "source": "files_workspace",
+                        "terminal_id": terminal_id,
+                    }
+                )
+
+        return references
+
+    async def _collect_reference_images(
+        self,
+        messages: List[dict],
+        files: Any,
+        request: Any,
+        metadata: Dict[str, Any],
+        user_context: Dict[str, Any],
+        oauth_token: Optional[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        references: List[Dict[str, Any]] = []
+
+        try:
+            references.extend(
+                self._extract_current_reference_images(messages)
+            )
+        except ValueError:
+            pass
+
+        references.extend(
+            await self._extract_filesystem_reference_images(
+                files,
+                request,
+                metadata,
+                user_context,
+                oauth_token,
+            )
+        )
+
+        if not references:
+            raise ValueError(
+                "No supported reference images were found in the current user turn."
+            )
+
+        references, duplicates_skipped = self._deduplicate_references(
+            references
+        )
+
+        if len(references) > self.MAX_REFERENCES:
+            raise ValueError(
+                f"Too many reference images: {len(references)}. "
+                f"Maximum is {self.MAX_REFERENCES}."
+            )
+
+        total_bytes = sum(
+            reference["size_bytes"]
+            for reference in references
+        )
+
+        if total_bytes > self.MAX_TOTAL_BYTES:
+            raise ValueError(
+                "Combined reference image size exceeds the maximum "
+                f"allowed total of {self.MAX_TOTAL_BYTES} bytes."
+            )
+
+        return references, duplicates_skipped
+
+    # ------------------------------------------------------------------
+    # Draft helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_draft_root(self) -> None:
+        self.DRAFT_ROOT.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        if not os.access(self.DRAFT_ROOT, os.W_OK):
+            raise PermissionError(
+                f"Open WebUI cannot write to {self.DRAFT_ROOT}"
+            )
+
+    def _draft_path(self, draft_id: str) -> Path:
+        draft_id = self._clean_string(draft_id)
+
+        if not re.fullmatch(r"draft-[0-9a-f]{32}", draft_id):
+            raise ValueError("Invalid image style draft_id.")
+
+        path = (self.DRAFT_ROOT / draft_id).resolve()
+        root = self.DRAFT_ROOT.resolve()
+
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("Invalid image style draft path.") from exc
+
+        return path
+
+    def _load_draft(self, draft_id: str) -> Tuple[Path, Dict[str, Any]]:
+        path = self._draft_path(draft_id)
+        draft_file = path / "draft.json"
+
+        if not draft_file.is_file():
+            raise ValueError(f"Image style draft not found: {draft_id}")
+
+        with open(
+            draft_file,
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            document = json.load(handle)
+
+        if not isinstance(document, dict):
+            raise ValueError("Image style draft document is invalid.")
+
+        if document.get("draft_id") != draft_id:
+            raise ValueError("Image style draft identity mismatch.")
+
+        return path, document
+
+    def _style_profile(
+        self,
+        style_identity: str,
+        medium: str,
+        lighting: str,
+        color_palette: str,
+        tonal_response: str,
+        texture: str,
+        optics: str,
+        depth_of_field: str,
+        composition: str,
+        atmosphere: str,
+        style_tags: List[str],
+        style_keywords: List[str],
+        generation_guidance: str,
+        avoid: str,
+    ) -> Dict[str, Any]:
+        return {
+            "style_identity": self._clean_string(style_identity),
+            "medium": self._clean_string(medium),
+            "lighting": self._clean_string(lighting),
+            "color_palette": self._clean_string(color_palette),
+            "tonal_response": self._clean_string(tonal_response),
+            "texture": self._clean_string(texture),
+            "optics": self._clean_string(optics),
+            "depth_of_field": self._clean_string(depth_of_field),
+            "composition": self._clean_string(composition),
+            "atmosphere": self._clean_string(atmosphere),
+            "style_tags": self._clean_string_list(style_tags),
+            "style_keywords": self._clean_string_list(style_keywords),
+            "generation_guidance": self._clean_string(
+                generation_guidance
+            ),
+            "avoid": self._clean_string(avoid),
+        }
+
+    def _provenance(
+        self,
+        provenance_status: str,
+        source_type: str,
+        source_title: str,
+        creator: str,
+    ) -> Dict[str, Any]:
+        status = (
+            self._clean_string(provenance_status).lower()
+            or "unknown"
+        )
+
+        allowed = {
+            "unknown",
+            "user_provided",
+            "verified",
+        }
+
+        if status not in allowed:
+            raise ValueError(
+                "provenance_status must be one of: "
+                "unknown, user_provided, verified."
+            )
+
+        source_type = self._clean_string(source_type)
+        source_title = self._clean_string(source_title)
+        creator = self._clean_string(creator)
+
+        if status == "unknown":
+            source_type = ""
+            source_title = ""
+            creator = ""
+
+        return {
+            "status": status,
+            "source_type": source_type or None,
+            "title": source_title or None,
+            "creator": creator or None,
+        }
+
+    def _draft_report(
+        self,
+        document: Dict[str, Any],
+        status: str,
+    ) -> str:
+        return json.dumps(
+            {
+                "status": status,
+                "draft_id": document.get("draft_id"),
+                "name": document.get("name"),
+                "reference_count": document.get(
+                    "reference_count",
+                    0,
+                ),
+                "duplicates_skipped": document.get(
+                    "duplicates_skipped",
+                    0,
+                ),
+                "provenance": document.get("provenance", {}),
+                "style": document.get("style", {}),
+            },
+            ensure_ascii=False,
+        )
+
+    # ------------------------------------------------------------------
     # Filesystem helpers
     # ------------------------------------------------------------------
 
@@ -667,6 +1238,520 @@ class Tools:
             return None, partial
 
         return None, []
+
+    async def create_image_style_draft(
+        self,
+        suggested_name: str,
+        style_identity: str,
+        medium: str,
+        lighting: str,
+        color_palette: str,
+        tonal_response: str,
+        texture: str,
+        optics: str,
+        depth_of_field: str,
+        composition: str,
+        atmosphere: str,
+        style_tags: List[str],
+        style_keywords: List[str],
+        generation_guidance: str,
+        avoid: str,
+        provenance_status: str = "unknown",
+        source_type: str = "",
+        source_title: str = "",
+        creator: str = "",
+        __messages__: List[dict] = [],
+        __files__: List[dict] = [],
+        __metadata__: Dict[str, Any] = {},
+        __request__: Any = None,
+        __user__: Dict[str, Any] = {},
+        __oauth_token__: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Create a non-published image-style draft.
+
+        This snapshots all current reference-image bytes immediately so a
+        later approval turn does not depend on historical chat attachments
+        or the continued availability of a Files Workspace source.
+
+        Creating a draft does NOT publish a style into /srv/image_styles.
+        """
+
+        name = self._clean_string(suggested_name)
+
+        if not name:
+            raise ValueError("suggested_name must not be empty.")
+
+        if len(name) > 160:
+            raise ValueError("suggested_name is too long.")
+
+        references, duplicates_skipped = (
+            await self._collect_reference_images(
+                __messages__,
+                __files__,
+                __request__,
+                __metadata__,
+                __user__,
+                __oauth_token__,
+            )
+        )
+
+        self._ensure_draft_root()
+
+        draft_id = f"draft-{uuid4().hex}"
+
+        tmp_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".tmp-{draft_id}-",
+                dir=self.DRAFT_ROOT,
+            )
+        )
+
+        final_dir = self.DRAFT_ROOT / draft_id
+        references_dir = tmp_dir / "references"
+
+        try:
+            references_dir.mkdir(
+                parents=True,
+                exist_ok=False,
+            )
+
+            reference_metadata: List[Dict[str, Any]] = []
+
+            for index, reference in enumerate(
+                references,
+                start=1,
+            ):
+                extension = reference["extension"]
+                filename = f"ref_{index:03d}.{extension}"
+                relative_path = Path("references") / filename
+                absolute_path = tmp_dir / relative_path
+
+                self._write_bytes(
+                    absolute_path,
+                    reference["data"],
+                )
+
+                item: Dict[str, Any] = {
+                    "filename": relative_path.as_posix(),
+                    "mime_type": reference["mime_type"],
+                    "size_bytes": reference["size_bytes"],
+                    "sha256": reference["sha256"],
+                    "source": reference.get(
+                        "source",
+                        "open_webui_message_data_url",
+                    ),
+                }
+
+                if reference.get("original_name"):
+                    item["original_name"] = reference[
+                        "original_name"
+                    ]
+
+                if reference.get("source_path"):
+                    item["source_path"] = reference[
+                        "source_path"
+                    ]
+
+                reference_metadata.append(item)
+
+            now = self._now_iso()
+
+            document: Dict[str, Any] = {
+                "schema_version": 1,
+                "artifact_type": "image_style_draft",
+                "draft_id": draft_id,
+                "name": name,
+                "created_at": now,
+                "updated_at": now,
+                "reference_count": len(reference_metadata),
+                "duplicates_skipped": duplicates_skipped,
+                "references": reference_metadata,
+                "provenance": self._provenance(
+                    provenance_status,
+                    source_type,
+                    source_title,
+                    creator,
+                ),
+                "style": self._style_profile(
+                    style_identity,
+                    medium,
+                    lighting,
+                    color_palette,
+                    tonal_response,
+                    texture,
+                    optics,
+                    depth_of_field,
+                    composition,
+                    atmosphere,
+                    style_tags,
+                    style_keywords,
+                    generation_guidance,
+                    avoid,
+                ),
+            }
+
+            self._write_json(
+                tmp_dir / "draft.json",
+                document,
+            )
+
+            if final_dir.exists():
+                raise FileExistsError(
+                    f"Draft destination unexpectedly exists: "
+                    f"{final_dir}"
+                )
+
+            os.rename(
+                tmp_dir,
+                final_dir,
+            )
+
+            tmp_dir = None
+
+        except Exception:
+            if tmp_dir is not None and tmp_dir.exists():
+                shutil.rmtree(
+                    tmp_dir,
+                    ignore_errors=True,
+                )
+            raise
+
+        return self._draft_report(
+            document,
+            "draft_created",
+        )
+
+    async def update_image_style_draft(
+        self,
+        draft_id: str,
+        suggested_name: str,
+        style_identity: str,
+        medium: str,
+        lighting: str,
+        color_palette: str,
+        tonal_response: str,
+        texture: str,
+        optics: str,
+        depth_of_field: str,
+        composition: str,
+        atmosphere: str,
+        style_tags: List[str],
+        style_keywords: List[str],
+        generation_guidance: str,
+        avoid: str,
+        provenance_status: str = "unknown",
+        source_type: str = "",
+        source_title: str = "",
+        creator: str = "",
+    ) -> str:
+        """
+        Replace the editable profile/provenance/name of an existing draft.
+
+        Snapshotted reference images are preserved unchanged.
+        This does not publish the draft.
+        """
+
+        draft_dir, document = self._load_draft(
+            self._clean_string(draft_id)
+        )
+
+        name = self._clean_string(suggested_name)
+
+        if not name:
+            raise ValueError("suggested_name must not be empty.")
+
+        if len(name) > 160:
+            raise ValueError("suggested_name is too long.")
+
+        document["name"] = name
+        document["updated_at"] = self._now_iso()
+        document["provenance"] = self._provenance(
+            provenance_status,
+            source_type,
+            source_title,
+            creator,
+        )
+        document["style"] = self._style_profile(
+            style_identity,
+            medium,
+            lighting,
+            color_palette,
+            tonal_response,
+            texture,
+            optics,
+            depth_of_field,
+            composition,
+            atmosphere,
+            style_tags,
+            style_keywords,
+            generation_guidance,
+            avoid,
+        )
+
+        temp_file = draft_dir / ".draft.json.tmp"
+
+        try:
+            self._write_json(
+                temp_file,
+                document,
+            )
+            os.replace(
+                temp_file,
+                draft_dir / "draft.json",
+            )
+        finally:
+            if temp_file.exists():
+                temp_file.unlink(
+                    missing_ok=True
+                )
+
+        return self._draft_report(
+            document,
+            "draft_updated",
+        )
+
+    async def publish_image_style_draft(
+        self,
+        draft_id: str,
+    ) -> str:
+        """
+        Publish one approved draft into the global Image Style Library.
+
+        The operation does not read current chat attachments. It publishes
+        only the exact profile and reference bytes already snapshotted in
+        the draft.
+        """
+
+        self._ensure_root()
+        self._ensure_draft_root()
+
+        draft_dir, draft = self._load_draft(
+            self._clean_string(draft_id)
+        )
+
+        name = self._clean_string(
+            draft.get("name")
+        )
+
+        if not name:
+            raise ValueError("Draft has no valid style name.")
+
+        references = draft.get("references")
+        if not isinstance(references, list) or not references:
+            raise ValueError(
+                "Draft contains no reference images."
+            )
+
+        style = draft.get("style")
+        provenance = draft.get("provenance")
+
+        if not isinstance(style, dict):
+            raise ValueError(
+                "Draft style profile is invalid."
+            )
+
+        if not isinstance(provenance, dict):
+            provenance = {
+                "status": "unknown",
+                "source_type": None,
+                "title": None,
+                "creator": None,
+            }
+
+        style_id, final_dir = self._allocate_style_id(
+            name
+        )
+
+        tmp_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".tmp-{style_id}-",
+                dir=self.ROOT_DIR,
+            )
+        )
+
+        try:
+            (tmp_dir / "references").mkdir(
+                parents=True,
+                exist_ok=False,
+            )
+
+            published_references: List[Dict[str, Any]] = []
+
+            for item in references:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "Draft reference metadata is invalid."
+                    )
+
+                filename = item.get("filename")
+                expected_sha = item.get("sha256")
+
+                if (
+                    not isinstance(filename, str)
+                    or not filename
+                    or not isinstance(expected_sha, str)
+                    or not re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        expected_sha,
+                    )
+                ):
+                    raise ValueError(
+                        "Draft reference metadata is invalid."
+                    )
+
+                source = (
+                    draft_dir / filename
+                ).resolve()
+
+                try:
+                    source.relative_to(
+                        draft_dir.resolve()
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "Draft reference path escapes draft root."
+                    ) from exc
+
+                if not source.is_file():
+                    raise ValueError(
+                        f"Draft reference is missing: {filename}"
+                    )
+
+                data = source.read_bytes()
+                actual_sha = hashlib.sha256(
+                    data
+                ).hexdigest()
+
+                if actual_sha != expected_sha:
+                    raise ValueError(
+                        f"Draft reference checksum mismatch: "
+                        f"{filename}"
+                    )
+
+                destination = (
+                    tmp_dir / filename
+                ).resolve()
+
+                try:
+                    destination.relative_to(
+                        tmp_dir.resolve()
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "Published reference path escapes style root."
+                    ) from exc
+
+                destination.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                self._write_bytes(
+                    destination,
+                    data,
+                )
+
+                published_item = dict(item)
+                published_item.pop(
+                    "source_path",
+                    None,
+                )
+                published_references.append(
+                    published_item
+                )
+
+            created_at = self._now_iso()
+
+            document: Dict[str, Any] = {
+                "schema_version": 1,
+                "style_id": style_id,
+                "name": name,
+                "created_at": created_at,
+                "reference_count": len(
+                    published_references
+                ),
+                "references": published_references,
+                "provenance": provenance,
+                "style": style,
+            }
+
+            self._write_json(
+                tmp_dir / "style.json",
+                document,
+            )
+
+            if final_dir.exists():
+                raise FileExistsError(
+                    f"Style destination unexpectedly exists: "
+                    f"{final_dir}"
+                )
+
+            os.rename(
+                tmp_dir,
+                final_dir,
+            )
+
+            tmp_dir = None
+
+        except Exception:
+            if tmp_dir is not None and tmp_dir.exists():
+                shutil.rmtree(
+                    tmp_dir,
+                    ignore_errors=True,
+                )
+            raise
+
+        shutil.rmtree(
+            draft_dir,
+            ignore_errors=False,
+        )
+
+        return json.dumps(
+            {
+                "status": "saved",
+                "draft_id": draft_id,
+                "style_id": style_id,
+                "name": name,
+                "path": str(final_dir),
+                "reference_count": len(
+                    published_references
+                ),
+                "duplicates_skipped": draft.get(
+                    "duplicates_skipped",
+                    0,
+                ),
+            },
+            ensure_ascii=False,
+        )
+
+    async def discard_image_style_draft(
+        self,
+        draft_id: str,
+    ) -> str:
+        """
+        Permanently discard one non-published image-style draft.
+        """
+
+        draft_dir, document = self._load_draft(
+            self._clean_string(draft_id)
+        )
+
+        shutil.rmtree(
+            draft_dir,
+            ignore_errors=False,
+        )
+
+        return json.dumps(
+            {
+                "status": "draft_discarded",
+                "draft_id": document.get(
+                    "draft_id"
+                ),
+                "name": document.get("name"),
+            },
+            ensure_ascii=False,
+        )
 
     async def list_image_styles(
         self,
