@@ -14,27 +14,216 @@ The resulting profile must describe visual properties that can be transferred to
 
 ## Execution
 
-When this skill is invoked with an attached image, perform the full style extraction immediately.
+When this skill is invoked with one or more attached reference images, begin
+the style extraction immediately.
 
-The skill invocation itself defines and authorizes the extraction scope.
+The skill invocation itself authorizes:
+
+- visual analysis of the current reference image set;
+- provenance lookup;
+- creation of a non-published image-style draft.
+
+It does **not** authorize publication into the global Image Style Library.
 
 Do not ask:
 
-- whether to proceed;
+- whether to proceed with extraction;
 - what aspects to analyze;
 - whether a full or partial profile is desired;
 - which style dimensions should be included;
-- follow-up questions about extraction scope.
+- whether provenance should be checked;
+- whether a draft should be created.
 
-Do not offer alternative extraction modes.
+Proceed directly through the extraction workflow until the completed draft
+profile is ready for user review.
 
-Proceed directly to the extraction workflow.
+Publication requires a separate, explicit user approval after the complete
+profile has been shown in chat.
 
-After analysis and provenance resolution:
+---
 
-- if the style is successfully saved into the active Files Workspace, return only a brief save report;
-- if no active Files Workspace is available, return the complete frozen style profile as JSON in chat and explicitly mark it as not saved;
-- never fall back silently to the global Image Style Library.
+### Workflow States
+
+This workflow has four distinct states:
+
+1. **Extraction**
+2. **Pending Approval**
+3. **Revision**
+4. **Publication or Discard**
+
+Do not collapse these states.
+
+A successful extraction is not the same thing as a saved library style.
+
+A draft is not a published style.
+
+---
+
+### Initial Extraction Turn
+
+For a new reference set:
+
+1. inspect all current reference images;
+2. perform the complete visual-style analysis;
+3. perform all abstraction, relevance, uncertainty, and consistency checks;
+4. create a descriptive fallback `suggested_name`;
+5. freeze all visual-style fields;
+6. only after the visual profile is frozen, perform provenance resolution;
+7. determine final provenance metadata and final `suggested_name`;
+8. call `create_image_style_draft` exactly once;
+9. verify that the Tool returned `status: "draft_created"`;
+10. show the complete draft profile to the user;
+11. ask whether to:
+    - save it as-is;
+    - revise it;
+    - discard it.
+
+Do not publish during the initial extraction turn.
+
+Do not call `publish_image_style_draft` merely because extraction succeeded.
+
+---
+
+### Pending Approval
+
+After `create_image_style_draft` succeeds, the draft becomes the authoritative
+working copy for this extraction workflow.
+
+Preserve the returned `draft_id` in conversation context.
+
+The user must be able to inspect the **complete** profile before publication.
+
+Show:
+
+- suggested name;
+- provenance;
+- every style field;
+- style tags;
+- style keywords;
+- generation guidance;
+- avoid guidance.
+
+Do not reduce the preview to a short summary.
+
+Do not hide fields merely because they are empty.
+
+After the preview, ask the user whether to save the draft as-is or make
+changes.
+
+Match the user's language when asking for approval.
+
+---
+
+### Explicit Approval
+
+Publish only when the user's response clearly authorizes saving the reviewed
+draft.
+
+Examples of sufficient approval include:
+
+- save it;
+- save as-is;
+- looks good, save;
+- yes, save;
+- publish;
+- сохранить;
+- сохраняй;
+- сохранить как есть;
+- да, сохраняй.
+
+When approval is clear:
+
+1. use the active `draft_id` from this workflow;
+2. call `publish_image_style_draft`;
+3. do not re-analyze the reference images;
+4. do not perform provenance lookup again;
+5. do not recreate the draft;
+6. do not call the legacy `save_image_style`;
+7. report success only if the Tool returns `status: "saved"`.
+
+Publication must use the exact profile and reference snapshot already stored
+in the approved draft.
+
+---
+
+### Revision
+
+If the user requests changes instead of approval:
+
+1. keep the same `draft_id`;
+2. interpret the requested changes narrowly;
+3. revise only the fields affected by the request, plus any fields that must
+   change to remain internally consistent;
+4. preserve all unaffected validated observations;
+5. preserve the snapshotted reference images;
+6. call `update_image_style_draft`;
+7. show the complete updated profile again;
+8. ask for approval again.
+
+Do not create a new draft for an ordinary revision.
+
+Do not re-read or re-import reference images merely because the profile was
+edited.
+
+Do not perform provenance lookup again unless the user specifically changes
+or challenges provenance information.
+
+If provenance is changed by the user, use
+`provenance_status = "user_provided"` unless independently verified evidence
+already supports the same provenance.
+
+A revision never implies publication.
+
+---
+
+### Discard
+
+If the user clearly asks to cancel, discard, delete, or abandon the pending
+draft:
+
+1. call `discard_image_style_draft` using the active `draft_id`;
+2. report that the non-published draft was discarded;
+3. do not publish it;
+4. do not create a replacement draft unless the user starts a new extraction.
+
+---
+
+### Missing Draft Context
+
+Never invent a `draft_id`.
+
+If the user asks to publish, revise, or discard a draft but no unambiguous
+active `draft_id` from this workflow is available in conversation context,
+do not guess.
+
+Explain that there is no identifiable active draft to operate on.
+
+Do not search the host filesystem, Files Workspace, or global library in an
+attempt to guess which draft the user meant.
+
+---
+
+### Tool Failure Behavior
+
+If any image-style draft Tool returns an error or raises an infrastructure,
+storage, permission, authorization, or internal failure:
+
+- report the actual failure clearly;
+- do not claim success;
+- do not attempt to repair server infrastructure;
+- do not inspect `/srv`;
+- do not browse unrelated Files Workspace directories;
+- do not call generic file-management Tools to work around the error;
+- do not switch storage backends;
+- do not fall back to `save_image_style`;
+- do not fall back to `save_image_style_to_workspace`.
+
+A Tool failure is an application/runtime problem, not an invitation for the
+model to administrate the host.
+
+The completed visual analysis may still be shown in chat when useful, but it
+must be clearly marked as not successfully drafted or not successfully
+published, according to the failed stage.
 
 ---
 
@@ -2306,54 +2495,53 @@ generated before provenance lookup.
 
 ---
 
-## Storage Handoff
+## Draft and Publication Handoff
 
-After completing the visual analysis, all validation passes, and provenance
-resolution, attempt to save the resulting style as a self-contained project
-artifact inside the active Files Workspace.
+The Image Style Library is global and independent of Files Workspace project
+storage.
 
-Use the `save_image_style_to_workspace` tool.
+Files Workspace may provide reference images, but it is **only a source
+provider**.
 
-Do not call the global `save_image_style` tool as part of this workflow.
+Never use Files Workspace as the publication backend for an extracted style.
 
-Do not ask the user whether the style should be saved.
+The intended storage model is:
 
-Invocation of this skill means:
+    current reference images
+            ↓
+    non-published draft snapshot
+            ↓
+    explicit user review / revision
+            ↓
+    explicit user approval
+            ↓
+    global Image Style Library
 
-1. analyze the attached reference image or images;
-2. construct and validate the complete reusable visual style profile;
-3. generate a descriptive fallback `suggested_name`;
-4. freeze the visual style profile;
-5. attempt provenance resolution with `reverse_image_search_all`;
-6. determine final provenance metadata and final `suggested_name`;
-7. call `save_image_style_to_workspace` exactly once;
-8. handle the Tool result according to the rules below.
+Draft storage and published library storage are separate implementation
+layers.
 
-### Project Artifact
+The Tool owns their actual filesystem locations.
 
-A successful saved style is a self-contained Files Workspace artifact:
+Do not instruct the model to construct, inspect, or manipulate those host
+paths directly.
 
-    /image-styles/<style_id>/
-    ├── style.json
-    └── references/
-        ├── ref_001.jpg
-        ├── ref_002.png
-        └── ...
+---
 
-Reference images are mandatory for a successfully saved artifact.
+### Draft Creation
 
-A successful extraction artifact is complete only when the Tool has saved:
+After completing:
 
-- `style.json`;
-- every unique supported reference image from the current user message;
-- valid reference metadata including MIME type, byte size, and SHA-256.
+- visual analysis;
+- abstraction;
+- style-relevance filtering;
+- final validation;
+- profile freeze;
+- provenance resolution;
+- final naming;
 
-Do not claim that the style was saved merely because the visual analysis
-completed successfully.
+call `create_image_style_draft`.
 
-### Tool Arguments
-
-Pass these arguments to `save_image_style_to_workspace`:
+Pass:
 
     {
       "suggested_name": "",
@@ -2377,21 +2565,30 @@ Pass these arguments to `save_image_style_to_workspace`:
       "creator": ""
     }
 
-The style-analysis fields passed to `save_image_style_to_workspace` must be
-exactly the frozen, validated visual style profile completed before provenance
-lookup.
+The style-analysis fields passed to `create_image_style_draft` must be exactly
+the frozen, validated visual style profile completed before provenance lookup.
 
-Do not rewrite the visual analysis after learning source provenance.
+Provenance may alter:
 
-### Reference Handoff
+- final `suggested_name`;
+- `provenance_status`;
+- `source_type`;
+- `source_title`;
+- `creator`.
 
-Do not pass any of the following to `save_image_style_to_workspace`:
+Provenance must not rewrite any visual-style field.
+
+---
+
+### Reference Snapshot
+
+Do not pass any of the following as model-generated Tool arguments:
 
 - image bytes;
-- base64 image data;
+- base64 data;
 - filenames;
 - attachment URLs;
-- logical file paths;
+- logical source paths;
 - host filesystem paths;
 - Files Workspace IDs;
 - Terminal connection IDs;
@@ -2399,25 +2596,189 @@ Do not pass any of the following to `save_image_style_to_workspace`:
 - API keys;
 - authorization headers.
 
-The Tool obtains the current reference images and active Files Workspace from
-trusted Open WebUI request context.
-
-Only images attached to the current user message are references for this save.
-
-Do not instruct the Tool to import older images merely because they already
-exist somewhere in the workspace.
+`create_image_style_draft` obtains the current reference images from trusted
+Open WebUI request context.
 
 The Tool is responsible for:
 
-- resolving the active Files Workspace;
-- inspecting current filesystem attachments;
-- validating supported image signatures;
-- obtaining authoritative MIME type, size, and SHA-256;
-- deduplicating references by SHA-256;
-- copying references into transactional staging;
-- writing `style.json` only after all reference copies succeed;
-- publishing the complete artifact;
-- verifying published reference integrity.
+- resolving supported current-turn reference images;
+- resolving authorized Files Workspace sources when applicable;
+- reading the complete source bytes;
+- validating image signatures;
+- determining MIME type;
+- determining byte size;
+- calculating SHA-256;
+- deduplicating equivalent reference representations;
+- snapshotting the exact unique reference bytes;
+- writing draft metadata transactionally.
+
+The purpose of the snapshot is to make later approval independent of whether
+the original attachment remains available on the approval turn.
+
+Once draft creation succeeds, future revision and publication must operate on
+the draft snapshot rather than historical attachments.
+
+---
+
+### Draft Result
+
+A successful `create_image_style_draft` result has:
+
+`status: "draft_created"`
+
+Treat the returned `draft_id` as the identity of the active pending draft.
+
+Do not invent or transform the returned `draft_id`.
+
+Do not report a library `style_id` at this stage.
+
+A `style_id` does not exist until publication succeeds.
+
+---
+
+### Review Preview
+
+After successful draft creation, show the complete profile in chat using this
+logical structure:
+
+    {
+      "status": "pending_approval",
+      "draft_id": "",
+      "suggested_name": "",
+      "provenance": {
+        "status": "unknown",
+        "source_type": "",
+        "title": "",
+        "creator": ""
+      },
+      "style": {
+        "style_identity": "",
+        "medium": "",
+        "lighting": "",
+        "color_palette": "",
+        "tonal_response": "",
+        "texture": "",
+        "optics": "",
+        "depth_of_field": "",
+        "composition": "",
+        "atmosphere": "",
+        "style_tags": [],
+        "style_keywords": [],
+        "generation_guidance": "",
+        "avoid": ""
+      }
+    }
+
+Use the actual draft values.
+
+The preview is for human review.
+
+It is not evidence of publication.
+
+After showing it, ask whether the user wants to save it as-is, revise it, or
+discard it.
+
+---
+
+### Draft Revision Handoff
+
+When the user requests changes, call `update_image_style_draft`.
+
+Pass:
+
+    {
+      "draft_id": "",
+      "suggested_name": "",
+      "style_identity": "",
+      "medium": "",
+      "lighting": "",
+      "color_palette": "",
+      "tonal_response": "",
+      "texture": "",
+      "optics": "",
+      "depth_of_field": "",
+      "composition": "",
+      "atmosphere": "",
+      "style_tags": [],
+      "style_keywords": [],
+      "generation_guidance": "",
+      "avoid": "",
+      "provenance_status": "unknown",
+      "source_type": "",
+      "source_title": "",
+      "creator": ""
+    }
+
+Pass the full updated profile, not a partial patch.
+
+Use the same active `draft_id`.
+
+The Tool preserves the reference snapshot.
+
+After `status: "draft_updated"`:
+
+- show the complete updated profile;
+- keep publication pending;
+- ask for approval again.
+
+---
+
+### Publication Handoff
+
+Only after explicit approval call:
+
+`publish_image_style_draft`
+
+Pass only the active:
+
+`draft_id`
+
+Do not pass the style profile again.
+
+Do not pass reference images again.
+
+Do not regenerate a name.
+
+Do not redo provenance.
+
+Do not call `save_image_style`.
+
+Do not call `save_image_style_to_workspace`.
+
+The publication Tool is responsible for validating the draft snapshot and
+atomically creating the final global library artifact.
+
+A successful publication result has:
+
+`status: "saved"`
+
+Only then may the style be described as saved or published.
+
+Report:
+
+- final style name;
+- actual returned `style_id`;
+- number of saved references;
+- publication success.
+
+The Tool result is authoritative if the final allocated `style_id` differs
+from an earlier descriptive expectation.
+
+---
+
+### Discard Handoff
+
+When the user asks to abandon the pending draft, call:
+
+`discard_image_style_draft`
+
+with the active `draft_id`.
+
+Only `status: "draft_discarded"` confirms successful discard.
+
+Do not publish after discard.
+
+---
 
 ### Provenance
 
@@ -2449,100 +2810,31 @@ reverse-image-search workflow.
 
 Never infer provenance from visual appearance.
 
-Never pass guessed provenance to `save_image_style_to_workspace`.
+Never pass guessed provenance into the draft.
 
-A provenance lookup failure does not prevent attempting to save the frozen
-style with `provenance_status = "unknown"`.
+A provenance lookup failure does not prevent draft creation.
 
-### Successful Tool Result
+Use `unknown` and retain the descriptive fallback name.
 
-If `save_image_style_to_workspace` returns:
+---
 
-`status: "saved"`
+### Storage Separation
 
-respond briefly with:
+Never treat these as interchangeable:
 
-- the saved style name;
-- the actual `style_id`;
-- the project artifact path when useful;
-- the number of saved reference images.
+- Files Workspace;
+- image-style draft storage;
+- global Image Style Library.
 
-Do not repeat the complete style profile unless the user explicitly asks for it.
+Files Workspace is not the image-style library.
 
-Do not output a second JSON copy of a successfully saved profile.
+A project Files Workspace is not required in order to publish a style when
+the current reference images are otherwise available to the Tool.
 
-### No Active Files Workspace
+The global library is the final publication destination.
 
-If `save_image_style_to_workspace` returns:
-
-`status: "not_saved"`
-
-because no active Files Workspace is available, do not call `save_image_style`
-and do not use `/srv/image_styles` as a fallback.
-
-The visual extraction itself is still valid.
-
-Return the complete frozen profile in chat as JSON using exactly this
-top-level structure:
-
-    {
-      "status": "not_saved",
-      "reason": "",
-      "artifact_type": "image_style_profile",
-      "suggested_name": "",
-      "provenance": {
-        "status": "unknown",
-        "source_type": "",
-        "title": "",
-        "creator": ""
-      },
-      "style": {
-        "style_identity": "",
-        "medium": "",
-        "lighting": "",
-        "color_palette": "",
-        "tonal_response": "",
-        "texture": "",
-        "optics": "",
-        "depth_of_field": "",
-        "composition": "",
-        "atmosphere": "",
-        "style_tags": [],
-        "style_keywords": [],
-        "generation_guidance": "",
-        "avoid": ""
-      }
-    }
-
-Use the actual Tool `reason` when available.
-
-This JSON represents the completed extraction result, but it is not a saved
-project artifact.
-
-Do not invent:
-
-- `style_id`;
-- artifact path;
-- saved reference metadata;
-- SHA-256 values;
-- file sizes;
-- MIME types.
-
-Those values belong only to an artifact actually created and verified by the
-Tool.
-
-### Other Save Failures
-
-If `save_image_style_to_workspace` returns `status: "error"`, do not claim
-success and do not fall back to the global Image Style Library.
-
-Report the actual Tool error clearly.
-
-The completed frozen visual profile may be returned in chat if useful, but
-must be explicitly marked as unsaved.
-
-If the Tool reports a cleanup warning or staging path, preserve that warning
-in the response rather than hiding it.
+The draft layer exists only to support review, revision, and explicit
+approval before publication.
 
 ---
 
@@ -2977,28 +3269,78 @@ the reference image.
 
 ---
 
-### Final Tool Handoff Test
+### Final Draft and Publication Handoff Test
 
-Before calling `save_image_style_to_workspace`, verify that:
+Before calling `create_image_style_draft`, verify that:
 
 - `suggested_name` is non-empty;
 - every required style field is present;
 - `style_tags` is an array of strings;
 - `style_keywords` is an array of strings;
 - provenance obeys the provenance rules;
-- the visual profile is frozen before provenance lookup;
+- the complete visual profile was frozen before provenance lookup;
+- provenance did not leak into visual-analysis fields;
 - no image bytes, base64 data, filenames, attachment URLs, file paths,
-  workspace identifiers, credentials, or authorization data are included in
-  the Tool arguments;
-- the profile has passed all abstraction and style-relevance tests.
+  workspace identifiers, credentials, or authorization data are included as
+  model-generated Tool arguments;
+- the profile has passed every abstraction, evidence, consistency, and
+  style-relevance test.
 
-Then call `save_image_style_to_workspace` exactly once.
+Then call `create_image_style_draft` exactly once for the current extraction.
 
-After the call:
+After draft creation:
 
-- `status: "saved"` means the project artifact was created and may be reported
-  as saved;
-- `status: "not_saved"` means return the complete frozen profile in chat and
-  explicitly state that no project artifact was created;
-- `status: "error"` means report the actual failure and do not claim a save;
-- never call the global `save_image_style` as fallback.
+- `status: "draft_created"` means a non-published review draft exists;
+- preserve the returned `draft_id`;
+- show the complete profile;
+- ask for explicit approval or requested changes;
+- do not publish automatically.
+
+Before calling `update_image_style_draft`, verify that:
+
+- an unambiguous active `draft_id` exists;
+- the user's requested revision has been incorporated;
+- unaffected validated fields remain preserved;
+- the full updated profile is internally consistent;
+- no publication has been implied merely by requesting edits.
+
+After update:
+
+- `status: "draft_updated"` means the draft changed successfully;
+- show the complete updated profile again;
+- ask for approval again.
+
+Before calling `publish_image_style_draft`, verify that:
+
+- the user has explicitly approved the reviewed draft;
+- the active `draft_id` is unambiguous;
+- no further revision is pending;
+- no re-analysis, re-import, or provenance lookup is required.
+
+Then call `publish_image_style_draft` with the `draft_id`.
+
+After publication:
+
+- `status: "saved"` is the only state that permits claiming that the style
+  has been saved into the global Image Style Library;
+- report the actual returned `style_id`;
+- do not claim publication if the Tool fails.
+
+Before calling `discard_image_style_draft`, verify that:
+
+- the user clearly intends to abandon the pending draft;
+- the active `draft_id` is unambiguous.
+
+After discard:
+
+- `status: "draft_discarded"` means the pending draft no longer exists;
+- do not publish or revise that discarded draft.
+
+At every stage:
+
+- never use `save_image_style_to_workspace`;
+- never use the legacy `save_image_style` as a fallback;
+- never inspect or manipulate host storage directly;
+- never attempt infrastructure repair through Files Workspace Tools;
+- never invent a `draft_id`, `style_id`, reference path, checksum, MIME type,
+  size, or save status.
