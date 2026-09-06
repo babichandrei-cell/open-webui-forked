@@ -3463,7 +3463,7 @@
 		files.push(
 			...(userMessage?.files ?? []).filter(
 				(item) =>
-					['doc', 'text', 'note', 'chat', 'collection', 'folder'].includes(item.type) ||
+					['doc', 'text', 'note', 'chat', 'collection', 'folder', 'filesystem'].includes(item.type) ||
 					(item.type === 'file' && !(item?.content_type ?? '').startsWith('image/'))
 			)
 		);
