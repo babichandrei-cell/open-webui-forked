@@ -229,15 +229,15 @@
 		<button
 			type="button"
 			class="flex min-w-0 flex-1 items-center gap-2 py-1.5 pr-2 text-left"
-			draggable={canMutate}
+			draggable={entry.type === 'file' || canMutate}
 			on:dragstart={(e) => {
-				if (!canMutate) {
+				if (entry.type !== 'file' && !canMutate) {
 					e.preventDefault();
 					return;
 				}
 				const filePath = entryPath.replace(/\/$/, '');
-				// If dragging a selected item, drag all selected
-				if (selected && selectedPaths.size > 1) {
+				// Move payload is available only for mutable entries.
+				if (canMutate && selected && selectedPaths.size > 1) {
 					e.dataTransfer?.setData(
 						'application/x-terminal-file-move',
 						JSON.stringify({ paths: [...selectedPaths] })
@@ -250,7 +250,7 @@
 					document.body.appendChild(ghost);
 					e.dataTransfer?.setDragImage(ghost, 0, 0);
 					requestAnimationFrame(() => ghost.remove());
-				} else {
+				} else if (canMutate) {
 					e.dataTransfer?.setData(
 						'application/x-terminal-file-move',
 						JSON.stringify({
@@ -265,8 +265,7 @@
 						JSON.stringify({
 							path: filePath,
 							name: entry.name,
-							url: terminalUrl,
-							key: terminalKey
+							size: entry.size
 						})
 					);
 				}

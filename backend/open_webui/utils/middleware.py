@@ -16,6 +16,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 from uuid import uuid4
 
+import aiohttp
+
 from aiocache import cached
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -131,6 +133,12 @@ from open_webui.utils.task import (
     rag_template,
     tools_function_calling_generation_template,
 )
+from open_webui.utils.terminals import (
+    TERMINAL_CONTEXT_HEADER,
+    get_terminal_server_url,
+    terminal_context_config,
+    terminal_context_id,
+)
 from open_webui.utils.tools import (
     build_tool_server_headers,
     get_attached_knowledge,
@@ -185,6 +193,260 @@ def _is_tool_result_error(value: Any) -> bool:
         )
 
     return False
+
+
+
+_FILESYSTEM_IMAGE_MIME_BY_EXTENSION = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
+}
+
+
+def _filesystem_image_mime(file: dict) -> str | None:
+    value = file.get("content_type") or file.get("mime_type")
+    if isinstance(value, str) and value.startswith("image/"):
+        return value
+
+    name = str(
+        file.get("name")
+        or file.get("path")
+        or file.get("url")
+        or ""
+    )
+    return _FILESYSTEM_IMAGE_MIME_BY_EXTENSION.get(
+        os.path.splitext(name)[1].lower()
+    )
+
+
+async def resolve_filesystem_images_for_model(
+    request: Request,
+    messages: list[dict],
+    metadata: dict,
+    user: UserModel,
+) -> list[dict]:
+    """
+    Resolve Files Workspace image attachments into transient data URLs
+    for the model request.
+
+    Persistent chat metadata keeps the logical filesystem path. The
+    actual image bytes are fetched only through the currently authorized
+    Files Workspace connection and are never written back to the chat DB.
+    """
+
+    if not isinstance(messages, list):
+        return messages
+
+    terminal_id = metadata.get("terminal_id")
+    if not isinstance(terminal_id, str) or not terminal_id.strip():
+        return messages
+
+    terminal_id = terminal_id.strip()
+
+    has_filesystem_images = any(
+        isinstance(message, dict)
+        and any(
+            isinstance(file, dict)
+            and file.get("type") == "filesystem"
+            and (
+                not file.get("terminal_id")
+                or file.get("terminal_id") == terminal_id
+            )
+            and _filesystem_image_mime(file)
+            for file in (message.get("files") or [])
+        )
+        for message in messages
+    )
+
+    if not has_filesystem_images:
+        return messages
+
+    connections = await Config.get(
+        "terminal_server.connections",
+        [],
+    ) or []
+
+    connection = next(
+        (
+            item
+            for item in connections
+            if isinstance(item, dict)
+            and item.get("id") == terminal_id
+        ),
+        None,
+    )
+
+    if connection is None or not connection.get("enabled", True):
+        return messages
+
+    connection_config = connection.get("config") or {}
+
+    if not (
+        connection_config.get("files_workspace") is True
+        or connection_config.get("chat_uploads") == "filesystem"
+    ):
+        return messages
+
+    # Reuse the normal terminal resolver first so Files Workspace access
+    # is subject to the same user/access/context checks as terminal tools.
+    await get_terminal_tools(
+        request,
+        terminal_id,
+        user,
+        {
+            "__metadata__": metadata,
+        },
+    )
+
+    headers, cookies = await build_tool_server_headers(
+        connection,
+        request,
+        user,
+        server_id=terminal_id,
+        metadata=metadata,
+        extra_params={},
+    )
+
+    headers["X-User-Id"] = user.id
+
+    chat_id = metadata.get("chat_id")
+    if chat_id:
+        headers["X-Session-Id"] = str(chat_id)
+
+    terminal_context = (
+        "automation"
+        if metadata.get("automation_id")
+        else "chat"
+    )
+
+    context_id = terminal_context_id(
+        connection,
+        metadata,
+        terminal_context,
+    )
+
+    context_config = terminal_context_config(
+        connection,
+        terminal_context,
+    )
+
+    if (
+        isinstance(context_config, dict)
+        and context_config.get("context_id")
+        in {"chat_id", "automation_id"}
+        and not context_id
+    ):
+        return messages
+
+    if context_id:
+        headers[TERMINAL_CONTEXT_HEADER] = context_id
+
+    base_url = get_terminal_server_url(connection).rstrip("/")
+
+    timeout = aiohttp.ClientTimeout(total=45)
+    cache: dict[str, str | None] = {}
+
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        trust_env=True,
+    ) as session:
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+
+            for file in message.get("files") or []:
+                if (
+                    not isinstance(file, dict)
+                    or file.get("type") != "filesystem"
+                ):
+                    continue
+
+                file_terminal_id = file.get("terminal_id")
+                if (
+                    file_terminal_id
+                    and file_terminal_id != terminal_id
+                ):
+                    continue
+
+                mime = _filesystem_image_mime(file)
+                if not mime:
+                    continue
+
+                filesystem_path = (
+                    file.get("path")
+                    or file.get("url")
+                    or file.get("id")
+                )
+
+                if not isinstance(filesystem_path, str) or not filesystem_path:
+                    continue
+
+                if filesystem_path not in cache:
+                    data_url = None
+
+                    try:
+                        async with session.get(
+                            f"{base_url}/files/view",
+                            params={"path": filesystem_path},
+                            headers=headers,
+                            cookies=cookies,
+                        ) as response:
+                            if response.status == 200:
+                                chunks = []
+                                total = 0
+                                max_bytes = 32 * 1024 * 1024
+
+                                async for chunk in response.content.iter_chunked(
+                                    64 * 1024
+                                ):
+                                    if not chunk:
+                                        continue
+
+                                    total += len(chunk)
+                                    if total > max_bytes:
+                                        chunks = []
+                                        break
+
+                                    chunks.append(chunk)
+
+                                if chunks:
+                                    data = b"".join(chunks)
+
+                                    response_mime = (
+                                        response.headers.get(
+                                            "Content-Type",
+                                            ""
+                                        )
+                                        .split(";", 1)[0]
+                                        .strip()
+                                    )
+
+                                    if response_mime.startswith("image/"):
+                                        mime = response_mime
+
+                                    data_url = (
+                                        f"data:{mime};base64,"
+                                        + base64.b64encode(data).decode("ascii")
+                                    )
+
+                    except Exception as exc:
+                        log.warning(
+                            "Failed to resolve Files Workspace image %s: %s",
+                            filesystem_path,
+                            exc,
+                        )
+
+                    cache[filesystem_path] = data_url
+
+                if cache.get(filesystem_path):
+                    # Transient request-only replacement. path/id remain
+                    # intact for Tools and persistent chat representation.
+                    file["url"] = cache[filesystem_path]
+
+    return messages
 
 
 def normalize_messages_for_model(form_data: dict) -> dict:
@@ -2427,6 +2689,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
             system_message = get_system_message(form_data.get('messages', []))
             form_data['messages'] = [system_message, *db_messages] if system_message else db_messages
+
+            # Resolve Files Workspace images to transient data URLs before
+            # the existing image-to-multimodal conversion below.
+            form_data['messages'] = await resolve_filesystem_images_for_model(
+                request,
+                form_data['messages'],
+                metadata,
+                user,
+            )
 
             # Inject image files into content as image_url parts (mirrors frontend logic)
             for message in form_data['messages']:

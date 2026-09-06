@@ -83,6 +83,7 @@
 	import Tooltip from '../common/Tooltip.svelte';
 	import FileItem from '../common/FileItem.svelte';
 	import Image from '../common/Image.svelte';
+	import FilesystemImage from './FilesystemImage.svelte';
 	import Spinner from '../common/Spinner.svelte';
 
 	import XMark from '../icons/XMark.svelte';
@@ -876,6 +877,64 @@
 		}
 	};
 
+	const FILESYSTEM_IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+		jpg: 'image/jpeg',
+		jpeg: 'image/jpeg',
+		png: 'image/png',
+		webp: 'image/webp',
+		gif: 'image/gif',
+		bmp: 'image/bmp'
+	};
+
+	const getFilesystemContentType = (value: any) => {
+		const existing = value?.content_type ?? value?.mime_type;
+		if (typeof existing === 'string' && existing) return existing;
+
+		const name = String(value?.name ?? value?.path ?? value?.url ?? '');
+		const extension = name.split('.').at(-1)?.toLowerCase() ?? '';
+		return FILESYSTEM_IMAGE_MIME_BY_EXTENSION[extension] ?? '';
+	};
+
+	const isFilesystemImage = (file: any) =>
+		file?.type === 'filesystem' &&
+		getFilesystemContentType(file).startsWith('image/');
+
+	const addFilesystemAttachment = (data: any) => {
+		const path = data?.path ?? data?.url ?? data?.id;
+		if (!path) return false;
+
+		if (
+			files.find(
+				(file) =>
+					file.type === 'filesystem' &&
+					(file.path ?? file.url ?? file.id) === path
+			)
+		) {
+			return false;
+		}
+
+		const contentType = getFilesystemContentType(data);
+
+		files = [
+			...files,
+			{
+				type: 'filesystem',
+				id: path,
+				path,
+				url: path,
+				name: data?.name ?? path.split('/').at(-1),
+				size: data?.size,
+				...(contentType ? { content_type: contentType } : {}),
+				...($selectedTerminalId
+					? { terminal_id: $selectedTerminalId }
+					: {}),
+				status: 'processed'
+			}
+		];
+
+		return true;
+	};
+
 	const getFilesystemUploadTerminal = (
 		selectedId = $selectedTerminalId,
 		servers: any[] | null = $terminalServers,
@@ -959,6 +1018,8 @@
 					fileItem.url = uploadedFile.path;
 					fileItem.size = uploadedFile.size ?? file.size;
 					fileItem.file = uploadedFile;
+					fileItem.content_type = file.type || getFilesystemContentType(fileItem);
+					fileItem.terminal_id = $selectedTerminalId;
 					files = files;
 					showFileNavDir.set(uploadedFile.path);
 				} else {
@@ -1202,7 +1263,8 @@
 		// (e.g. Notes, Workspace, pinned Models), which also set 'text/plain'.
 		if (
 			e.dataTransfer?.types?.includes('Files') ||
-			e.dataTransfer?.types?.includes('application/x-open-webui-drag')
+			e.dataTransfer?.types?.includes('application/x-open-webui-drag') ||
+			e.dataTransfer?.types?.includes('application/x-terminal-file')
 		) {
 			dragged = true;
 		} else {
@@ -1220,6 +1282,23 @@
 	const onDrop = async (e: DragEvent) => {
 		e.preventDefault();
 		console.log(e);
+
+		const terminalFileData =
+			e.dataTransfer?.getData('application/x-terminal-file');
+
+		if (terminalFileData) {
+			try {
+				const data = JSON.parse(terminalFileData);
+
+				addFilesystemAttachment(data);
+
+				dragged = false;
+				e.stopPropagation();
+				return;
+			} catch (_) {
+				// Invalid terminal-file payload.
+			}
+		}
 
 		// Check if the dropped data is a sidebar chat, folder, note, or model item
 		const textData = e.dataTransfer?.getData('text/plain');
@@ -1374,25 +1453,7 @@
 								}
 							];
 						} else if (type === 'filesystem') {
-							const path = data.path ?? data.url ?? data.id;
-							if (
-								!path ||
-								files.find((f) => f.type === 'filesystem' && (f.path ?? f.url ?? f.id) === path)
-							) {
-								return;
-							}
-							files = [
-								...files,
-								{
-									type: 'filesystem',
-									id: path,
-									path,
-									url: path,
-									name: data.name,
-									size: data.size,
-									status: 'processed'
-								}
-							];
+							addFilesystemAttachment(data);
 						} else {
 							if (files.find((f) => f.url === data || f.name === data)) {
 								return;
@@ -1897,7 +1958,29 @@
 									dir={$settings?.chatDirection ?? 'auto'}
 								>
 									{#each files as file, fileIdx}
-										{#if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
+										{#if isFilesystemImage(file)}
+							<div class="relative group">
+								<FilesystemImage
+									{file}
+									{chatId}
+									imageClassName="size-10 rounded-xl object-cover"
+								/>
+
+								<div class="absolute -top-1 -right-1">
+									<button
+										type="button"
+										aria-label={$i18n.t('Remove file')}
+										class="bg-white text-black border border-white rounded-full hover-reveal transition"
+										on:click={() => {
+											files.splice(fileIdx, 1);
+											files = files;
+										}}
+									>
+										<XMark className="size-4" />
+									</button>
+								</div>
+							</div>
+						{:else if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
 											{@const fileUrl =
 												file.url.startsWith('data') || file.url.startsWith('http')
 													? file.url

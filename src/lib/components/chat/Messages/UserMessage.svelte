@@ -18,6 +18,7 @@
 	import FileItem from '$lib/components/common/FileItem.svelte';
 	import Markdown from './Markdown.svelte';
 	import Image from '$lib/components/common/Image.svelte';
+	import FilesystemImage from '../FilesystemImage.svelte';
 	import DeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
 	import SubagentResultRow from './SubagentResultRow.svelte';
 
@@ -67,6 +68,24 @@
 			}
 		}
 	}
+	const FILESYSTEM_IMAGE_EXTENSIONS = new Set([
+		'jpg',
+		'jpeg',
+		'png',
+		'webp',
+		'gif',
+		'bmp'
+	]);
+
+	const isFilesystemImage = (file: any) => {
+		if (file?.type !== 'filesystem') return false;
+		if ((file?.content_type ?? '').startsWith('image/')) return true;
+
+		const name = String(file?.name ?? file?.path ?? file?.url ?? '');
+		const extension = name.split('.').at(-1)?.toLowerCase() ?? '';
+		return FILESYSTEM_IMAGE_EXTENSIONS.has(extension);
+	};
+
 	const copyToClipboard = async (text) => {
 		const res = await _copyToClipboard(text);
 		if (res) {
@@ -183,7 +202,13 @@
 									? file.url
 									: `${WEBUI_API_BASE_URL}/files/${file.url}${file?.content_type ? '/content' : ''}`}
 							<div class={($settings?.chatBubble ?? true) ? 'self-end' : ''}>
-								{#if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
+								{#if isFilesystemImage(file)}
+									<FilesystemImage
+										{file}
+										{chatId}
+										imageClassName="max-h-96 max-w-full rounded-lg"
+									/>
+								{:else if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
 									<Image src={fileUrl} imageClassName=" max-h-96 rounded-lg" />
 								{:else}
 									<FileItem
