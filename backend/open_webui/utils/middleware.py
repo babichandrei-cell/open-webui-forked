@@ -237,14 +237,49 @@ async def resolve_filesystem_images_for_model(
     Files Workspace connection and are never written back to the chat DB.
     """
 
+    log.warning(
+        "FSIMG resolver entered: messages=%s metadata_terminal_id_present=%s chat_id_present=%s",
+        len(messages) if isinstance(messages, list) else "not-list",
+        bool(metadata.get("terminal_id")),
+        bool(metadata.get("chat_id")),
+    )
+
     if not isinstance(messages, list):
         return messages
 
-    terminal_id = metadata.get("terminal_id")
-    if not isinstance(terminal_id, str) or not terminal_id.strip():
+    metadata_terminal_id = metadata.get("terminal_id")
+    if isinstance(metadata_terminal_id, str):
+        metadata_terminal_id = metadata_terminal_id.strip() or None
+    else:
+        metadata_terminal_id = None
+
+    attachment_terminal_ids = {
+        file_terminal_id.strip()
+        for message in messages
+        if isinstance(message, dict)
+        for file in (message.get("files") or [])
+        if isinstance(file, dict)
+        and file.get("type") == "filesystem"
+        and _filesystem_image_mime(file)
+        and isinstance((file_terminal_id := file.get("terminal_id")), str)
+        and file_terminal_id.strip()
+    }
+
+    if metadata_terminal_id:
+        terminal_id = metadata_terminal_id
+    elif len(attachment_terminal_ids) == 1:
+        terminal_id = next(iter(attachment_terminal_ids))
+    else:
+        log.warning(
+            "FSIMG terminal resolution failed: attachment_terminal_ids=%d",
+            len(attachment_terminal_ids),
+        )
         return messages
 
-    terminal_id = terminal_id.strip()
+    log.warning(
+        "FSIMG terminal resolved: source=%s",
+        "metadata" if metadata_terminal_id else "attachment",
+    )
 
     has_filesystem_images = any(
         isinstance(message, dict)
@@ -259,6 +294,11 @@ async def resolve_filesystem_images_for_model(
             for file in (message.get("files") or [])
         )
         for message in messages
+    )
+
+    log.warning(
+        "FSIMG attachment scan: found=%s",
+        has_filesystem_images,
     )
 
     if not has_filesystem_images:
@@ -277,6 +317,12 @@ async def resolve_filesystem_images_for_model(
             and item.get("id") == terminal_id
         ),
         None,
+    )
+
+    log.warning(
+        "FSIMG connection lookup: found=%s enabled=%s",
+        connection is not None,
+        connection.get("enabled", True) if connection else None,
     )
 
     if connection is None or not connection.get("enabled", True):
@@ -394,6 +440,13 @@ async def resolve_filesystem_images_for_model(
                             headers=headers,
                             cookies=cookies,
                         ) as response:
+                            log.warning(
+                                "FSIMG fetch: path=%s status=%s content_type=%s",
+                                filesystem_path,
+                                response.status,
+                                response.headers.get("Content-Type", ""),
+                            )
+
                             if response.status == 200:
                                 chunks = []
                                 total = 0
