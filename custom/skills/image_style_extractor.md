@@ -28,7 +28,13 @@ Do not ask:
 
 Do not offer alternative extraction modes.
 
-Proceed directly to the required final JSON output.
+Proceed directly to the extraction workflow.
+
+After analysis and provenance resolution:
+
+- if the style is successfully saved into the active Files Workspace, return only a brief save report;
+- if no active Files Workspace is available, return the complete frozen style profile as JSON in chat and explicitly mark it as not saved;
+- never fall back silently to the global Image Style Library.
 
 ---
 
@@ -2302,8 +2308,13 @@ generated before provenance lookup.
 
 ## Storage Handoff
 
-After completing the analysis and all validation steps, save the resulting
-style profile by calling the `save_image_style` tool.
+After completing the visual analysis, all validation passes, and provenance
+resolution, attempt to save the resulting style as a self-contained project
+artifact inside the active Files Workspace.
+
+Use the `save_image_style_to_workspace` tool.
+
+Do not call the global `save_image_style` tool as part of this workflow.
 
 Do not ask the user whether the style should be saved.
 
@@ -2315,43 +2326,98 @@ Invocation of this skill means:
 4. freeze the visual style profile;
 5. attempt provenance resolution with `reverse_image_search_all`;
 6. determine final provenance metadata and final `suggested_name`;
-7. call `save_image_style`;
-8. report the successful save result briefly.
+7. call `save_image_style_to_workspace` exactly once;
+8. handle the Tool result according to the rules below.
 
-Pass these arguments to `save_image_style`:
+### Project Artifact
 
-{
-  "suggested_name": "",
-  "style_identity": "",
-  "medium": "",
-  "lighting": "",
-  "color_palette": "",
-  "tonal_response": "",
-  "texture": "",
-  "optics": "",
-  "depth_of_field": "",
-  "composition": "",
-  "atmosphere": "",
-  "style_tags": [],
-  "style_keywords": [],
-  "generation_guidance": "",
-  "avoid": "",
-  "provenance_status": "unknown",
-  "source_type": "",
-  "source_title": "",
-  "creator": ""
-}
+A successful saved style is a self-contained Files Workspace artifact:
 
-The style-analysis fields passed to `save_image_style` must be the same
-validated style profile completed before provenance lookup.
+    /image-styles/<style_id>/
+    ├── style.json
+    └── references/
+        ├── ref_001.jpg
+        ├── ref_002.png
+        └── ...
+
+Reference images are mandatory for a successfully saved artifact.
+
+A successful extraction artifact is complete only when the Tool has saved:
+
+- `style.json`;
+- every unique supported reference image from the current user message;
+- valid reference metadata including MIME type, byte size, and SHA-256.
+
+Do not claim that the style was saved merely because the visual analysis
+completed successfully.
+
+### Tool Arguments
+
+Pass these arguments to `save_image_style_to_workspace`:
+
+    {
+      "suggested_name": "",
+      "style_identity": "",
+      "medium": "",
+      "lighting": "",
+      "color_palette": "",
+      "tonal_response": "",
+      "texture": "",
+      "optics": "",
+      "depth_of_field": "",
+      "composition": "",
+      "atmosphere": "",
+      "style_tags": [],
+      "style_keywords": [],
+      "generation_guidance": "",
+      "avoid": "",
+      "provenance_status": "unknown",
+      "source_type": "",
+      "source_title": "",
+      "creator": ""
+    }
+
+The style-analysis fields passed to `save_image_style_to_workspace` must be
+exactly the frozen, validated visual style profile completed before provenance
+lookup.
 
 Do not rewrite the visual analysis after learning source provenance.
 
-Do not pass image bytes, base64 data, filenames, file paths, or attachment URLs
-to the tool.
+### Reference Handoff
 
-The tool obtains the reference images directly from the current Open WebUI
-message context.
+Do not pass any of the following to `save_image_style_to_workspace`:
+
+- image bytes;
+- base64 image data;
+- filenames;
+- attachment URLs;
+- logical file paths;
+- host filesystem paths;
+- Files Workspace IDs;
+- Terminal connection IDs;
+- bearer tokens;
+- API keys;
+- authorization headers.
+
+The Tool obtains the current reference images and active Files Workspace from
+trusted Open WebUI request context.
+
+Only images attached to the current user message are references for this save.
+
+Do not instruct the Tool to import older images merely because they already
+exist somewhere in the workspace.
+
+The Tool is responsible for:
+
+- resolving the active Files Workspace;
+- inspecting current filesystem attachments;
+- validating supported image signatures;
+- obtaining authoritative MIME type, size, and SHA-256;
+- deduplicating references by SHA-256;
+- copying references into transactional staging;
+- writing `style.json` only after all reference copies succeed;
+- publishing the complete artifact;
+- verifying published reference integrity.
 
 ### Provenance
 
@@ -2383,26 +2449,100 @@ reverse-image-search workflow.
 
 Never infer provenance from visual appearance.
 
-Never pass guessed provenance to `save_image_style`.
+Never pass guessed provenance to `save_image_style_to_workspace`.
 
-A provenance lookup failure does not prevent saving the style with
-`provenance_status = "unknown"`.
+A provenance lookup failure does not prevent attempting to save the frozen
+style with `provenance_status = "unknown"`.
 
-### Tool Result
+### Successful Tool Result
 
-If `save_image_style` returns `status: "saved"`, respond briefly with:
+If `save_image_style_to_workspace` returns:
+
+`status: "saved"`
+
+respond briefly with:
 
 - the saved style name;
 - the actual `style_id`;
+- the project artifact path when useful;
 - the number of saved reference images.
 
 Do not repeat the complete style profile unless the user explicitly asks for it.
 
-Do not output an additional JSON copy of the profile after a successful tool call.
+Do not output a second JSON copy of a successfully saved profile.
 
-If saving fails, report the actual tool error.
+### No Active Files Workspace
 
-Do not claim that the style was saved unless the tool returned a successful result.
+If `save_image_style_to_workspace` returns:
+
+`status: "not_saved"`
+
+because no active Files Workspace is available, do not call `save_image_style`
+and do not use `/srv/image_styles` as a fallback.
+
+The visual extraction itself is still valid.
+
+Return the complete frozen profile in chat as JSON using exactly this
+top-level structure:
+
+    {
+      "status": "not_saved",
+      "reason": "",
+      "artifact_type": "image_style_profile",
+      "suggested_name": "",
+      "provenance": {
+        "status": "unknown",
+        "source_type": "",
+        "title": "",
+        "creator": ""
+      },
+      "style": {
+        "style_identity": "",
+        "medium": "",
+        "lighting": "",
+        "color_palette": "",
+        "tonal_response": "",
+        "texture": "",
+        "optics": "",
+        "depth_of_field": "",
+        "composition": "",
+        "atmosphere": "",
+        "style_tags": [],
+        "style_keywords": [],
+        "generation_guidance": "",
+        "avoid": ""
+      }
+    }
+
+Use the actual Tool `reason` when available.
+
+This JSON represents the completed extraction result, but it is not a saved
+project artifact.
+
+Do not invent:
+
+- `style_id`;
+- artifact path;
+- saved reference metadata;
+- SHA-256 values;
+- file sizes;
+- MIME types.
+
+Those values belong only to an artifact actually created and verified by the
+Tool.
+
+### Other Save Failures
+
+If `save_image_style_to_workspace` returns `status: "error"`, do not claim
+success and do not fall back to the global Image Style Library.
+
+Report the actual Tool error clearly.
+
+The completed frozen visual profile may be returned in chat if useful, but
+must be explicitly marked as unsaved.
+
+If the Tool reports a cleanup warning or staging path, preserve that warning
+in the response rather than hiding it.
 
 ---
 
@@ -2839,14 +2979,26 @@ the reference image.
 
 ### Final Tool Handoff Test
 
-Before calling `save_image_style`, verify that:
+Before calling `save_image_style_to_workspace`, verify that:
 
 - `suggested_name` is non-empty;
 - every required style field is present;
 - `style_tags` is an array of strings;
 - `style_keywords` is an array of strings;
 - provenance obeys the provenance rules;
-- no image content or attachment data is included in the tool arguments;
+- the visual profile is frozen before provenance lookup;
+- no image bytes, base64 data, filenames, attachment URLs, file paths,
+  workspace identifiers, credentials, or authorization data are included in
+  the Tool arguments;
 - the profile has passed all abstraction and style-relevance tests.
 
-Then call `save_image_style` exactly once.
+Then call `save_image_style_to_workspace` exactly once.
+
+After the call:
+
+- `status: "saved"` means the project artifact was created and may be reported
+  as saved;
+- `status: "not_saved"` means return the complete frozen profile in chat and
+  explicitly state that no project artifact was created;
+- `status: "error"` means report the actual failure and do not claim a save;
+- never call the global `save_image_style` as fallback.
