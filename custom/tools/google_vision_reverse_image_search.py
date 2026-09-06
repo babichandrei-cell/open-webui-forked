@@ -2,7 +2,7 @@
 title: Google Vision Reverse Image Search
 description: Identifies one or more images attached to the current user message using Google Cloud Vision Web Detection.
 author: local
-version: 1.1.0
+version: 1.2.0
 """
 
 import asyncio
@@ -11,10 +11,21 @@ import json
 import os
 import urllib.error
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+import aiohttp
+
+from open_webui.models.config import Config
 from open_webui.models.files import Files
+from open_webui.models.users import Users
+from open_webui.utils.terminals import (
+    TERMINAL_CONTEXT_HEADER,
+    get_terminal_server_url,
+    terminal_context_config,
+    terminal_context_id,
+)
+from open_webui.utils.tools import build_tool_server_headers, get_terminal_tools
 
 
 class Tools:
@@ -230,6 +241,274 @@ class Tools:
         return []
 
     # ================================================================
+    # FILES WORKSPACE SOURCE
+    # ================================================================
+
+    @staticmethod
+    def _filesystem_attachment_path(item: dict) -> str | None:
+        if not isinstance(item, dict) or item.get("type") != "filesystem":
+            return None
+
+        nested = item.get("file")
+
+        candidates = [
+            item.get("path"),
+            nested.get("path") if isinstance(nested, dict) else None,
+            item.get("id"),
+            item.get("url"),
+        ]
+
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                value = candidate.strip()
+                return value if value.startswith("/") else f"/{value}"
+
+        return None
+
+    @staticmethod
+    def _filesystem_attachment_name(
+        item: dict,
+        path: str,
+    ) -> str:
+        candidates = [
+            item.get("name"),
+            item.get("filename"),
+        ]
+
+        nested = item.get("file")
+
+        if isinstance(nested, dict):
+            candidates.extend(
+                [
+                    nested.get("name"),
+                    nested.get("filename"),
+                ]
+            )
+
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return Path(candidate).name
+
+        return PurePosixPath(path).name or "attached-image"
+
+    async def _resolve_files_workspace(
+        self,
+        request: Any,
+        metadata: dict | None,
+        user_context: dict | None,
+        oauth_token: dict | None,
+    ) -> tuple[dict | None, dict | None, dict | None]:
+        """
+        Resolve and authorize the active Files Workspace.
+
+        The model never supplies a host path, base URL, or workspace token.
+        The selected terminal ID comes from trusted Open WebUI metadata.
+        """
+
+        if request is None:
+            return None, None, None
+
+        metadata = metadata if isinstance(metadata, dict) else {}
+
+        terminal_id = metadata.get("terminal_id")
+
+        if not isinstance(terminal_id, str) or not terminal_id.strip():
+            return None, None, None
+
+        terminal_id = terminal_id.strip()
+
+        connections = await Config.get(
+            "terminal_server.connections",
+            [],
+        ) or []
+
+        connection = next(
+            (
+                item
+                for item in connections
+                if isinstance(item, dict)
+                and item.get("id") == terminal_id
+            ),
+            None,
+        )
+
+        if connection is None or not connection.get("enabled", True):
+            return None, None, None
+
+        connection_config = connection.get("config") or {}
+
+        is_files_workspace = (
+            connection_config.get("files_workspace") is True
+            or connection_config.get("chat_uploads") == "filesystem"
+        )
+
+        if not is_files_workspace:
+            return None, None, None
+
+        user_id = None
+
+        if isinstance(user_context, dict):
+            value = user_context.get("id")
+
+            if value:
+                user_id = str(value)
+
+        if not user_id:
+            return None, None, None
+
+        user = await Users.get_user_by_id(user_id)
+
+        if user is None:
+            return None, None, None
+
+        # Reuse the normal terminal resolver so the same connection
+        # access-control and chat-context rules are enforced.
+        await get_terminal_tools(
+            request,
+            terminal_id,
+            user,
+            {
+                "__metadata__": metadata,
+                "__oauth_token__": oauth_token,
+            },
+        )
+
+        headers, cookies = await build_tool_server_headers(
+            connection,
+            request,
+            user,
+            server_id=terminal_id,
+            metadata=metadata,
+            extra_params={
+                "__oauth_token__": oauth_token,
+            },
+        )
+
+        headers["X-User-Id"] = user.id
+
+        chat_id = metadata.get("chat_id")
+
+        if chat_id:
+            headers["X-Session-Id"] = str(chat_id)
+
+        terminal_context = (
+            "automation"
+            if metadata.get("automation_id")
+            else "chat"
+        )
+
+        context_id = terminal_context_id(
+            connection,
+            metadata,
+            terminal_context,
+        )
+
+        context_config = terminal_context_config(
+            connection,
+            terminal_context,
+        )
+
+        if (
+            isinstance(context_config, dict)
+            and context_config.get("context_id")
+            in {"chat_id", "automation_id"}
+            and not context_id
+        ):
+            return None, None, None
+
+        if context_id:
+            headers[TERMINAL_CONTEXT_HEADER] = context_id
+
+        return connection, headers, cookies
+
+    async def _find_images_in_filesystem(
+        self,
+        files: list[dict] | None,
+        request: Any,
+        metadata: dict | None,
+        user_context: dict | None,
+        oauth_token: dict | None,
+    ) -> list[dict[str, Any]]:
+        attachments = [
+            item
+            for item in files or []
+            if isinstance(item, dict)
+            and item.get("type") == "filesystem"
+        ]
+
+        if not attachments:
+            return []
+
+        connection, headers, cookies = (
+            await self._resolve_files_workspace(
+                request,
+                metadata,
+                user_context,
+                oauth_token,
+            )
+        )
+
+        if (
+            connection is None
+            or headers is None
+            or cookies is None
+        ):
+            return []
+
+        base_url = get_terminal_server_url(connection).rstrip("/")
+
+        images: list[dict[str, Any]] = []
+
+        timeout = aiohttp.ClientTimeout(total=45)
+
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            trust_env=True,
+        ) as session:
+            for item in attachments:
+                path = self._filesystem_attachment_path(item)
+
+                if not path:
+                    continue
+
+                try:
+                    async with session.get(
+                        f"{base_url}/files/view",
+                        params={"path": path},
+                        headers=headers,
+                        cookies=cookies,
+                    ) as response:
+                        if response.status != 200:
+                            continue
+
+                        # Bound memory use. MAX+1 is sufficient for the
+                        # existing oversized-image check downstream.
+                        data = await response.content.read(
+                            self.MAX_RAW_IMAGE_BYTES + 1
+                        )
+
+                except Exception:
+                    continue
+
+                if not data or not self._looks_like_image(data):
+                    continue
+
+                images.append(
+                    {
+                        "data": data,
+                        "filename": (
+                            self._filesystem_attachment_name(
+                                item,
+                                path,
+                            )
+                        ),
+                        "image_source": "filesystem",
+                    }
+                )
+
+        return images
+
+    # ================================================================
     # FALLBACK SOURCE: OPEN WEBUI ATTACHMENT
     # ================================================================
 
@@ -350,8 +629,23 @@ class Tools:
         messages: list[dict] | None,
         files: list[dict] | None,
         user_id: str | None,
+        request: Any = None,
+        metadata: dict | None = None,
+        user_context: dict | None = None,
+        oauth_token: dict | None = None,
     ) -> list[dict[str, Any]]:
         images = self._find_images_in_messages(messages)
+
+        if images:
+            return images
+
+        images = await self._find_images_in_filesystem(
+            files,
+            request,
+            metadata,
+            user_context,
+            oauth_token,
+        )
 
         if images:
             return images
@@ -366,6 +660,10 @@ class Tools:
         messages: list[dict] | None,
         files: list[dict] | None,
         user_id: str | None,
+        request: Any = None,
+        metadata: dict | None = None,
+        user_context: dict | None = None,
+        oauth_token: dict | None = None,
     ) -> tuple[bytes | None, str | None, str | None]:
         """
         Compatibility helper for the existing single-image function.
@@ -378,6 +676,10 @@ class Tools:
             messages,
             files,
             user_id,
+            request,
+            metadata,
+            user_context,
+            oauth_token,
         )
 
         if not images:
@@ -663,6 +965,9 @@ class Tools:
         __messages__: list[dict] | None = None,
         __files__: list[dict] | None = None,
         __user__: dict | None = None,
+        __metadata__: dict | None = None,
+        __request__: Any = None,
+        __oauth_token__: dict | None = None,
     ) -> str:
         """
         Identify the real-world subject shown in the current user's attached
@@ -705,6 +1010,10 @@ class Tools:
             __messages__,
             __files__,
             user_id,
+            __request__,
+            __metadata__,
+            __user__,
+            __oauth_token__,
         )
 
         if not image_data:
@@ -760,6 +1069,9 @@ class Tools:
         __messages__: list[dict] | None = None,
         __files__: list[dict] | None = None,
         __user__: dict | None = None,
+        __metadata__: dict | None = None,
+        __request__: Any = None,
+        __oauth_token__: dict | None = None,
     ) -> str:
         """
         Reverse-search every image attached to the current user reference set.
@@ -805,6 +1117,10 @@ class Tools:
             __messages__,
             __files__,
             user_id,
+            __request__,
+            __metadata__,
+            __user__,
+            __oauth_token__,
         )
 
         if not images:
