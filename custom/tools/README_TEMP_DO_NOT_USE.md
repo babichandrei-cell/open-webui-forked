@@ -1,0 +1,1 @@
+Temporary marker for development context verification. Safe to remove after implementation.
