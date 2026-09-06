@@ -2,7 +2,7 @@
 title: Google Vision Reverse Image Search
 description: Identifies one or more images attached to the current user message using Google Cloud Vision Web Detection.
 author: local
-version: 1.2.0
+version: 1.2.1
 """
 
 import asyncio
@@ -481,11 +481,40 @@ class Tools:
                         if response.status != 200:
                             continue
 
-                        # Bound memory use. MAX+1 is sufficient for the
-                        # existing oversized-image check downstream.
-                        data = await response.content.read(
-                            self.MAX_RAW_IMAGE_BYTES + 1
-                        )
+                        # Read the complete response body while keeping
+                        # the existing raw-image memory bound. StreamReader
+                        # read(n) may return only the currently available
+                        # chunk, so a single read(n) can truncate an image.
+                        chunks: list[bytes] = []
+                        total = 0
+
+                        async for chunk in response.content.iter_chunked(
+                            64 * 1024
+                        ):
+                            if not chunk:
+                                continue
+
+                            remaining = (
+                                self.MAX_RAW_IMAGE_BYTES
+                                + 1
+                                - total
+                            )
+
+                            if remaining <= 0:
+                                break
+
+                            if len(chunk) > remaining:
+                                chunks.append(chunk[:remaining])
+                                total += remaining
+                                break
+
+                            chunks.append(chunk)
+                            total += len(chunk)
+
+                            if total > self.MAX_RAW_IMAGE_BYTES:
+                                break
+
+                        data = b"".join(chunks)
 
                 except Exception:
                     continue
