@@ -513,6 +513,302 @@ Before an upstream update:
 
 Do not use `npm audit fix --force` as part of routine update work.
 
+## Image attachment and Image Style workflow checkpoint
+
+The Files Workspace integration has since been extended to support images as
+first-class chat/model attachments and as trusted inputs to custom Tools.
+
+### Files Workspace image attachment transport
+
+Images selected from the active Files Workspace can be attached to chat
+without copying them into the normal Open WebUI upload store.
+
+The frontend can preview these filesystem-backed attachments, and the backend
+resolves them into valid multimodal image content for the model.
+
+The same attachment can also be consumed by custom Tools through trusted
+request context.
+
+This transport was verified with `The_Mask_18.jpg`:
+
+```text
+size:   129919 bytes
+sha256: b008ed57ae10dff22c4f62dbe5f2e0640b7cefd299fcc12d1a50a7ca63155322
+```
+
+The model backend accepted the resulting multimodal image payload without a
+decode error.
+
+### Google Vision Files Workspace support
+
+`custom/tools/google_vision_reverse_image_search.py` supports authorized
+filesystem attachments from the active Files Workspace.
+
+Security properties:
+
+- Files Workspace identity comes from trusted Open WebUI request metadata;
+- the selected connection must be enabled and filesystem-capable;
+- current-user access is validated;
+- the image is fetched through the authenticated `/files/view` route;
+- complete binary content is read before validation;
+- image signatures are validated;
+- arbitrary model-supplied host paths, base URLs, bearer tokens, API keys, or
+  authorization headers are not accepted as filesystem-resolution inputs.
+
+An end-to-end Files Workspace reverse-image lookup was successfully performed
+with `The_Mask_18.jpg`.
+
+### Global Image Style Library architecture
+
+Image styles are global reusable artifacts and are deliberately independent of
+project Files Workspaces.
+
+Current storage model:
+
+```text
+/srv/image_style_drafts/<draft_id>/
+    draft.json
+    references/*
+
+/srv/image_styles/<style_id>/
+    style.json
+    references/*
+```
+
+Files Workspace is a reference-image source only.
+
+It is not the image-style publication backend.
+
+### Image Style draft lifecycle
+
+The current `image_style_extractor` workflow separates extraction from
+publication:
+
+```text
+reference images
+    ↓
+visual style analysis
+    ↓
+freeze content-independent profile
+    ↓
+reverse_image_search_all provenance lookup
+    ↓
+create_image_style_draft
+    ↓
+exact reference-byte snapshot
+    ↓
+complete profile preview
+    ↓
+explicit user decision
+    ├── revise  → update_image_style_draft → preview again
+    ├── discard → discard_image_style_draft
+    └── approve → publish_image_style_draft
+                         ↓
+                  /srv/image_styles
+```
+
+Skill invocation authorizes extraction and creation of a non-published draft.
+It does not authorize publication.
+
+Publication requires a separate explicit user approval after the complete
+profile has been shown.
+
+Later approval does not depend on historical chat attachments because the
+draft owns an exact snapshot of the reference bytes.
+
+### Image Style Library runtime storage
+
+Production Open WebUI runs as:
+
+```text
+User=andrei
+Group=andrei
+DynamicUser=no
+```
+
+The required runtime storage roots are:
+
+```text
+/srv/image_styles
+/srv/image_style_drafts
+```
+
+They are writable by the production Open WebUI service identity.
+
+The Tool, rather than the model, owns host filesystem interaction for these
+storage roots.
+
+The model must not inspect `/srv`, repair permissions, switch storage
+backends, or use Files Workspace file-management operations as a workaround
+for Image Style Library errors.
+
+### Reference deduplication and source preservation
+
+A Files Workspace image may appear twice in Open WebUI request context:
+
+1. as the original filesystem attachment;
+2. as a transient multimodal data URL generated for model vision.
+
+`image_style_library` hashes complete reference bytes with SHA-256 and removes
+duplicate representations.
+
+Files Workspace references are collected before transient message data URLs,
+so deduplication retains the richer original metadata:
+
+```json
+{
+  "source": "files_workspace",
+  "original_name": "<original filename>",
+  "source_path": "<workspace path>"
+}
+```
+
+This behavior was verified with `The_Mask_18.jpg`; one unique reference was
+stored while the duplicate multimodal representation was skipped, and the
+stored SHA-256 matched the original file byte-for-byte.
+
+### Verified full Image Style E2E
+
+A complete multi-reference production test was performed with three
+Files Workspace images:
+
+```text
+Bugonia_08.jpg
+Bugonia_13.jpg
+Bugonia_14.jpg
+```
+
+Observed workflow:
+
+```text
+view_skill
+→ visual analysis
+→ reverse_image_search_all
+→ verified provenance
+→ create_image_style_draft
+→ complete preview
+→ explicit user approval
+→ publish_image_style_draft
+```
+
+Reverse-image evidence identified the source as:
+
+```text
+title:   Bugonia
+creator: Yorgos Lanthimos
+type:    film
+status:  verified
+```
+
+The pending draft contained three unique reference images.
+
+No publication occurred on the extraction turn.
+
+After the user explicitly approved the preview, the model called only
+`publish_image_style_draft`; it did not re-analyze the images, repeat
+provenance lookup, or create another draft.
+
+Final published artifact:
+
+```text
+/srv/image_styles/bugonia
+```
+
+Published metadata:
+
+```text
+style_id:        bugonia
+name:            Bugonia
+reference_count: 3
+provenance:      verified
+```
+
+Reference integrity was verified against `style.json`:
+
+```text
+ref_001.jpg
+size:   226911
+sha256: 4660c5143daa922e34abe41305f915ec3e5de2e4dd78fc72f4137cdf2cacccf9
+
+ref_002.jpg
+size:   233069
+sha256: c69d8b633f5b05c94d8cdd5d8df3289648bd0738e79fcd165102ded57c1f1c29
+
+ref_003.jpg
+size:   216184
+sha256: 67576f2b84736f89c5711ae68f1cabb92f00ba0f416796540040f4017d46a581
+```
+
+The actual published files produced the same SHA-256 values.
+
+After successful publication, the consumed draft directory no longer existed.
+
+This verifies the complete production path:
+
+```text
+Files Workspace
+→ trusted reference read
+→ visual extraction
+→ provenance
+→ immutable draft snapshot
+→ human approval boundary
+→ global publication
+→ integrity verification
+→ draft cleanup
+```
+
+### Runtime versus canonical custom definitions
+
+Custom Skills and Tools have two distinct copies:
+
+```text
+custom/* in Git
+        ↕ explicit synchronization
+Open WebUI production database
+```
+
+Editing the repository file alone does not deploy the corresponding Skill or
+Tool.
+
+Runtime synchronization must use the production data directory explicitly:
+
+```text
+DATA_DIR=/srv/open-webui/data
+PYTHONPATH=/srv/open-webui-forked/backend
+```
+
+Production secrets must be loaded from protected environment files without
+printing them.
+
+For Skills, the runtime model is the `skill` table and `SkillsTable`; do not
+use the Prompts table for Skill synchronization.
+
+For Tools, preserve existing runtime metadata and update the Tool content/specs
+through the Open WebUI Tool model/runtime loader.
+
+Never run standalone Open WebUI model imports without an explicit safe
+`DATA_DIR`; doing so can create an unintended local database.
+
+### Deprecated Files Workspace style-publication experiment
+
+`custom/tools/image_style_workspace.py` represents an earlier experiment in
+publishing image styles into the active Files Workspace.
+
+That architecture has been superseded.
+
+Current rule:
+
+```text
+Files Workspace = reference source
+Image Style draft storage = review state
+Global Image Style Library = publication destination
+```
+
+Do not use `image_style_workspace.py` in the active extractor workflow.
+
+Before deleting it from the repository, confirm separately that no runtime
+Tool or Skill still depends on it.
+
 ## Recommended next development step
 
 Do not add features merely because they are conceivable. Continue from real use and testing.
