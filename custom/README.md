@@ -4,6 +4,25 @@ This directory documents the custom Skills and Tools used by this Open WebUI dep
 
 They are application-level workflow components rather than modifications to the Open WebUI core. Keeping their definitions and architecture in the repository gives the project a versioned source of truth and makes it possible to reconstruct the working environment without relying on the Open WebUI database alone.
 
+## Canonical source layout
+
+```text
+custom/
+├── README.md
+├── skills/
+│   ├── image_style_extractor.md
+│   ├── imagine.md
+│   └── visual-identification--web-verification.md
+└── tools/
+    ├── image_style_library.py
+    ├── google_vision_reverse_image_search.py
+    └── searxng_image_search.py
+```
+
+The files in `custom/skills` contain the Skill instruction bodies used by Open WebUI. The files in `custom/tools` contain the Python Tool source bodies used by Open WebUI. Open WebUI's database remains the live runtime copy; this directory is the Git-tracked canonical copy for development, review, backup, and reconstruction.
+
+When a Skill or Tool is changed in the Open WebUI UI, its canonical repository copy should be updated in the same development session. Conversely, when a repository copy is changed first, the corresponding runtime component must be updated explicitly in Open WebUI before treating the change as deployed.
+
 ## Skills
 
 ### `image_style_extractor`
@@ -25,6 +44,8 @@ Depends on:
 - `Image Style Library` Tool;
 - `Google Vision Reverse Image Search` Tool for optional provenance resolution.
 
+Canonical source: `custom/skills/image_style_extractor.md`.
+
 ### `imagine`
 
 Image-generation workflow optimized for Krea 2.
@@ -37,6 +58,8 @@ Depends on:
 
 - `Image Style Library` Tool when a saved style is requested;
 - the Open WebUI image-generation Tool/backend.
+
+Canonical source: `custom/skills/imagine.md`.
 
 ### `visual-identification--web-verification`
 
@@ -55,6 +78,8 @@ Depends on:
 
 - `Google Vision Reverse Image Search` Tool;
 - Open WebUI web-search/fetch capabilities.
+
+Canonical source: `custom/skills/visual-identification--web-verification.md`.
 
 ## Tools
 
@@ -78,6 +103,8 @@ Important properties:
 - no remote image fetching during save;
 - ambiguous style lookup is reported instead of guessed.
 
+Canonical source: `custom/tools/image_style_library.py`.
+
 ### `google_vision_reverse_image_search`
 
 Uses Google Cloud Vision Web Detection for real reverse-image matching.
@@ -95,6 +122,8 @@ Runtime dependency:
 
 The API key must never be committed to this repository.
 
+Canonical source: `custom/tools/google_vision_reverse_image_search.py`.
+
 ### `searxng_image_search`
 
 Image-search helper backed by the local SearXNG instance.
@@ -107,6 +136,8 @@ Public functions:
 Default local SearXNG endpoint: `http://127.0.0.1:8888`.
 
 The Tool deliberately distinguishes search-result metadata from visual inspection: titles and URLs are not treated as evidence of visual similarity.
+
+Canonical source: `custom/tools/searxng_image_search.py`.
 
 ## Architectural relationships
 
@@ -144,6 +175,20 @@ searxng_image_search
       └── inspect_search_image ─────► model vision context
 ```
 
+## Runtime versus repository state
+
+The repository copies are not loaded automatically by Open WebUI merely because they exist here. There are two distinct layers:
+
+```text
+Git repository canonical copy
+        ↕ explicit synchronization
+Open WebUI database/runtime copy
+```
+
+This separation is intentional for now. It makes changes reviewable and version-controlled without coupling Open WebUI startup to repository files.
+
+If automatic synchronization is ever added, it should be treated as a separate deployment feature with explicit conflict and rollback semantics rather than silently overwriting runtime definitions.
+
 ## Repository policy
 
 - Keep secrets, API keys and environment files out of Git.
@@ -151,6 +196,7 @@ searxng_image_search
 - When a Skill or Tool is changed in Open WebUI, update its repository copy as part of the same development step.
 - Runtime data such as `/srv/image_styles`, Open WebUI databases, generated images and Project Files workspace contents do not belong in this directory.
 - Tool source should contain safe defaults only; deployment-specific secrets belong in protected environment configuration.
+- Export JSON from Open WebUI may be used as a transport/backup format, but the canonical repository copy should remain the readable Skill Markdown or Tool Python source unless there is a concrete reason to version the full export envelope.
 
 ## Current compatibility
 
