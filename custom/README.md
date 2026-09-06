@@ -15,7 +15,6 @@ custom/
 │   └── visual-identification--web-verification.md
 └── tools/
     ├── image_style_library.py
-    ├── image_style_workspace.py
     ├── google_vision_reverse_image_search.py
     └── searxng_image_search.py
 ```
@@ -287,21 +286,6 @@ Files Workspace
 ```
 
 Do not use Files Workspace as the publication backend for extracted styles.
-
-## Deprecated/experimental component
-
-`custom/tools/image_style_workspace.py` remains in the repository as an
-earlier Files Workspace publication experiment.
-
-Its publication model is **not** the current architecture and it must not be
-used by `image_style_extractor`.
-
-The current architecture publishes approved styles only through
-`image_style_library` into the global `/srv/image_styles` library.
-
-The file is retained temporarily for review/history and may be removed in a
-separate cleanup change after confirming that no runtime component depends on
-it.
 
 ## Runtime versus repository state
 

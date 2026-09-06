@@ -789,14 +789,15 @@ through the Open WebUI Tool model/runtime loader.
 Never run standalone Open WebUI model imports without an explicit safe
 `DATA_DIR`; doing so can create an unintended local database.
 
-### Deprecated Files Workspace style-publication experiment
+### Retired Files Workspace style-publication experiment
 
-`custom/tools/image_style_workspace.py` represents an earlier experiment in
-publishing image styles into the active Files Workspace.
+The earlier `image_style_workspace` publication experiment has been removed
+from both the production Open WebUI Tool registry and the canonical repository.
 
-That architecture has been superseded.
+It had attempted to publish extracted styles into the active Files Workspace.
+That architecture was superseded by the global Image Style Library workflow.
 
-Current rule:
+Current authoritative rule:
 
 ```text
 Files Workspace = reference source
@@ -804,10 +805,19 @@ Image Style draft storage = review state
 Global Image Style Library = publication destination
 ```
 
-Do not use `image_style_workspace.py` in the active extractor workflow.
+Runtime verification after cleanup showed:
 
-Before deleting it from the repository, confirm separately that no runtime
-Tool or Skill still depends on it.
+```text
+RUNTIME SKILLS:
+PROHIBITION-ONLY MATCH: image_style_extractor
+
+RUNTIME TOOLS:
+NONE
+```
+
+The remaining `save_image_style_to_workspace` references inside
+`image_style_extractor` are explicit safety prohibitions and are not runtime
+dependencies.
 
 ## Recommended next development step
 
